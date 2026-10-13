@@ -32,6 +32,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
 )
 from homeassistant.core import HomeAssistant, State
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
@@ -45,6 +46,7 @@ from custom_components.smartheat.const import (
     CONF_MIN_OPEN,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
+    CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
     CONF_VALVE,
     CONF_WINDOW_SENSOR,
@@ -56,6 +58,7 @@ from custom_components.smartheat.const import (
 VALVE = "input_boolean.test_valve"
 ROOM = "sensor.test_room"
 RETURN = "sensor.test_return"
+SUPPLY = "sensor.test_supply"
 WINDOW = "binary_sensor.test_window"
 CLIMATE = "climate.test_zone"
 
@@ -69,32 +72,61 @@ def set_temperature(hass: HomeAssistant, entity_id: str, value: float) -> None:
 
 
 async def setup_zone(hass: HomeAssistant, **options: Any) -> MockConfigEntry:
-    """Set up a radiator zone (initial overshoot 0.2 °C) without minimum valve times."""
+    """Set up a radiator zone (initial overshoot 0.2 °C) without minimum valve times.
+
+    An option set to None is left out, like a sensor left empty in the settings.
+    """
     assert await async_setup_component(
         hass, "input_boolean", {"input_boolean": {"test_valve": None}}
     )
     set_temperature(hass, ROOM, 21.0)
     set_temperature(hass, RETURN, 30.0)
     hass.states.async_set(WINDOW, STATE_OFF)
+    settings = {
+        **default_options(SYSTEM_RADIATOR),
+        CONF_VALVE: VALVE,
+        CONF_ROOM_SENSOR: ROOM,
+        CONF_RETURN_SENSOR: RETURN,
+        CONF_WINDOW_SENSOR: WINDOW,
+        CONF_MIN_OPEN: 0,
+        CONF_MIN_CLOSED: 0,
+        **options,
+    }
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Test zone",
         data={CONF_SYSTEM_TYPE: SYSTEM_RADIATOR},
-        options={
-            **default_options(SYSTEM_RADIATOR),
-            CONF_VALVE: VALVE,
-            CONF_ROOM_SENSOR: ROOM,
-            CONF_RETURN_SENSOR: RETURN,
-            CONF_WINDOW_SENSOR: WINDOW,
-            CONF_MIN_OPEN: 0,
-            CONF_MIN_CLOSED: 0,
-            **options,
-        },
+        options={key: value for key, value in settings.items() if value is not None},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     return entry
+
+
+async def save_options(
+    hass: HomeAssistant, entry: MockConfigEntry, options: dict[str, Any]
+) -> None:
+    """Save the zone's settings through the options flow, which reloads it."""
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], options
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+
+
+def zone_sensors(
+    entity_registry: er.EntityRegistry, entry: MockConfigEntry
+) -> dict[str, str]:
+    """Return the entity IDs of the zone's registered sensors, by key."""
+    prefix = f"{entry.entry_id}_"
+    registered = er.async_entries_for_config_entry(entity_registry, entry.entry_id)
+    return {
+        item.unique_id.removeprefix(prefix): item.entity_id
+        for item in registered
+        if item.domain == "sensor"
+    }
 
 
 async def test_idles_at_target(hass: HomeAssistant) -> None:
@@ -121,6 +153,98 @@ async def test_opens_when_cold_and_closes_before_target(hass: HomeAssistant) -> 
     attributes = hass.states.get(CLIMATE).attributes
     assert attributes["coasting"] is True
     assert attributes["reason"] == "coasting"
+
+
+async def test_zone_without_return_sensor(
+    hass: HomeAssistant, entity_registry: er.EntityRegistry
+) -> None:
+    entry = await setup_zone(hass, **{CONF_RETURN_SENSOR: None})
+    attributes = hass.states.get(CLIMATE).attributes
+    assert attributes["return_sensor_entity_id"] is None
+    assert attributes["return_temperature"] is None  # RETURN exists, but isn't read
+    sensors = zone_sensors(entity_registry, entry)
+    assert "learned_overshoot" in sensors
+    assert "heat_storage_factor" not in sensors
+    assert "holding_difference" not in sensors
+
+    set_temperature(hass, ROOM, 20.5)
+    await hass.async_block_till_done()
+    assert hass.states.get(VALVE).state == STATE_ON
+
+    set_temperature(hass, ROOM, 20.85)  # closes at 21 - 0.2, the average overshoot
+    await hass.async_block_till_done()
+    assert hass.states.get(VALVE).state == STATE_OFF
+    attributes = hass.states.get(CLIMATE).attributes
+    assert attributes["reason"] == "coasting"
+    assert attributes["predicted_overshoot"] == 0.2
+    assert attributes["close_threshold"] == 20.8
+
+    # β and h, learned before the return sensor was removed, stay unused
+    model = entry.runtime_data.controller.model
+    model.beta, model.beta_samples, model.holding_delta = 0.5, 3, 4.0
+    set_temperature(hass, ROOM, 20.9)
+    await hass.async_block_till_done()
+    attributes = hass.states.get(CLIMATE).attributes
+    assert attributes["trained"] is False
+    assert attributes["predicted_overshoot"] == 0.2
+
+
+@pytest.mark.parametrize("return_sensor", [RETURN, None])
+async def test_supply_sensor_attributes(
+    hass: HomeAssistant, return_sensor: str | None
+) -> None:
+    set_temperature(hass, SUPPLY, 50.0)
+    await setup_zone(
+        hass, **{CONF_SUPPLY_SENSOR: SUPPLY, CONF_RETURN_SENSOR: return_sensor}
+    )
+    attributes = hass.states.get(CLIMATE).attributes
+    assert attributes["supply_temperature"] == 50.0
+    assert attributes["no_heat_source"] is False
+    # These compare the supply with the return, so they need both sensors
+    compared = {"supply_return_delta": 20.0, "loop_saturated": False}
+    if return_sensor:
+        assert {key: attributes[key] for key in compared} == compared
+    else:
+        assert compared.keys().isdisjoint(attributes)
+
+
+@pytest.mark.parametrize(
+    ("removed", "dependent_sensors"),
+    [
+        (
+            CONF_RETURN_SENSOR,
+            {"heat_storage_factor", "holding_difference", "supply_return_difference"},
+        ),
+        (CONF_SUPPLY_SENSOR, {"supply_return_difference"}),
+    ],
+)
+async def test_removed_sensor_takes_its_diagnostic_sensors_along(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    removed: str,
+    dependent_sensors: set[str],
+) -> None:
+    set_temperature(hass, SUPPLY, 50.0)
+    entry = await setup_zone(hass, **{CONF_SUPPLY_SENSOR: SUPPLY})
+    sensors = zone_sensors(entity_registry, entry)
+    assert dependent_sensors <= sensors.keys()
+
+    options = dict(entry.options)
+    removed_entity_id = options.pop(removed)
+    await save_options(hass, entry, options)
+    assert zone_sensors(entity_registry, entry) == {
+        key: entity_id
+        for key, entity_id in sensors.items()
+        if key not in dependent_sensors
+    }
+    for key in dependent_sensors:
+        assert hass.states.get(sensors[key]) is None  # not left behind as unavailable
+
+    # Adding the sensor back brings them back, under their old entity IDs
+    await save_options(hass, entry, {**options, removed: removed_entity_id})
+    assert zone_sensors(entity_registry, entry) == sensors
+    for entity_id in sensors.values():
+        assert hass.states.get(entity_id).state != STATE_UNAVAILABLE
 
 
 async def test_window_and_off_close_the_valve(hass: HomeAssistant) -> None:

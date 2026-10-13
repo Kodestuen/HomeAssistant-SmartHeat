@@ -29,14 +29,15 @@ ENTITIES = {
     CONF_ROOM_SENSOR: "sensor.living_room_temperature",
     CONF_RETURN_SENSOR: "sensor.living_room_return",
 }
+NO_RETURN = {key: value for key, value in ENTITIES.items() if key != CONF_RETURN_SENSOR}
 
 
-def zone_entry(**options) -> MockConfigEntry:
+def zone_entry(system_type: str = SYSTEM_UNDERFLOOR, **options) -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN,
         title="Living room",
-        data={CONF_SYSTEM_TYPE: SYSTEM_UNDERFLOOR},
-        options={**default_options(SYSTEM_UNDERFLOOR), **ENTITIES, **options},
+        data={CONF_SYSTEM_TYPE: system_type},
+        options={**default_options(system_type), **ENTITIES, **options},
     )
 
 
@@ -76,6 +77,35 @@ async def test_room_and_return_sensor_must_differ(hass: HomeAssistant) -> None:
     assert result["errors"] == {CONF_RETURN_SENSOR: "same_sensor"}
 
 
+async def test_radiator_zone_without_return_sensor(hass: HomeAssistant) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with patch("custom_components.smartheat.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_NAME: "Bedroom", CONF_SYSTEM_TYPE: SYSTEM_RADIATOR, **NO_RETURN},
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {CONF_SYSTEM_TYPE: SYSTEM_RADIATOR}
+    assert result["options"] == {**default_options(SYSTEM_RADIATOR), **NO_RETURN}
+
+
+async def test_underfloor_zone_needs_return_sensor(hass: HomeAssistant) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_NAME: "Living room", CONF_SYSTEM_TYPE: SYSTEM_UNDERFLOOR, **NO_RETURN},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_RETURN_SENSOR: "return_required"}
+
+
 async def test_valve_used_twice_aborts(hass: HomeAssistant) -> None:
     zone_entry().add_to_hass(hass)
     result = await hass.config_entries.flow.async_init(
@@ -105,6 +135,35 @@ async def test_options_flow_changes_settings_and_removes_sensor(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_HYSTERESIS] == 0.5
     assert CONF_SUPPLY_SENSOR not in entry.options
+
+
+async def test_options_flow_removes_return_sensor_of_radiator_zone(
+    hass: HomeAssistant,
+) -> None:
+    entry = zone_entry(SYSTEM_RADIATOR)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**default_options(SYSTEM_RADIATOR), **NO_RETURN}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert CONF_RETURN_SENSOR not in entry.options
+
+
+async def test_options_flow_keeps_return_sensor_of_underfloor_zone(
+    hass: HomeAssistant,
+) -> None:
+    entry = zone_entry()
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**default_options(SYSTEM_UNDERFLOOR), **NO_RETURN}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_RETURN_SENSOR: "return_required"}
+    assert entry.options[CONF_RETURN_SENSOR] == ENTITIES[CONF_RETURN_SENSOR]
 
 
 async def test_options_flow_rejects_min_above_max(hass: HomeAssistant) -> None:

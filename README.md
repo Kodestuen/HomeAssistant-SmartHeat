@@ -12,7 +12,7 @@ One SmartHeat zone uses:
 |---|---|---|
 | Valve (`switch`, `input_boolean` or `valve`) | yes | Lets hot water into the zone |
 | Room temperature sensor | yes | What the zone controls |
-| Return temperature sensor | yes | Water temperature at the end of the loop, on the return pipe |
+| Return temperature sensor | for underfloor heating | Water temperature at the end of the loop, on the return pipe; optional for radiators ([see below](#radiators-without-a-return-sensor)) |
 | Supply temperature sensor | no | Water going in; used to notice when no hot water is available |
 | Window or door sensor | no | The valve stays closed while it is open |
 
@@ -23,7 +23,7 @@ The control rules:
 3. **Coast**: after an early close, the valve stays closed until the room has peaked, even if the room is still below the opening threshold. The peak is then used for learning.
 4. **Safety first**. These rules override the minimum open and closed times:
    - The valve closes when the return temperature exceeds the maximum (to protect the floor), when the window is open, when the zone is off, or when the room sensor has been unavailable longer than the timeout.
-   - Below the frost protection temperature the valve opens, even when the zone is off. If the room sensor is gone, the return temperature stands in for it.
+   - Below the frost protection temperature the valve opens, even when the zone is off. If the room sensor is gone, the return temperature stands in for it (when the zone has a return sensor).
 5. **Minimum open and closed times** protect thermal actuators, which need a few minutes to move.
 
 ### What is learned
@@ -41,7 +41,7 @@ where **β** is how much heat the emitter stores relative to the room. A thick s
 - **h (holding difference)**: right after the valve opens, the room keeps cooling until the emitter just covers the heat loss. The return-minus-room difference at that low point is h. Water is flowing at that moment, so the return sensor reads the emitter and not a cold pipe.
 - **β (heat storage factor)**: learned from the overshoot actually measured after each early close.
 
-Until three cycles have taught β, SmartHeat uses a plain average of the measured overshoot. It starts from 0.4 °C for underfloor heating and 0.2 °C for radiators. Learning is skipped for cycles that are disturbed: the target changes, the window opens, the zone is switched off, or there was no hot water.
+Until three cycles have taught β, SmartHeat uses a plain average of the measured overshoot, and without a return sensor it always does. It starts from 0.4 °C for underfloor heating and 0.2 °C for radiators. Learning is skipped for cycles that are disturbed: the target changes, the window opens, the zone is switched off, or there was no hot water.
 
 ### Simulation results
 
@@ -51,18 +51,30 @@ Until three cycles have taught β, SmartHeat uses a plain average of the measure
 - a night setback from 21 °C to 19 °C
 - changing weather
 
-After the first days of learning:
+After the first days of learning, the room peaks this far from the target on average, and at most this far above it (mean / worst):
 
-| | Plain thermostat: peak above target (mean / worst) | SmartHeat |
-|---|---|---|
-| Underfloor heating | 0.60 / 1.22 °C | 0.15 / 0.35 °C |
-| Radiators | 0.36 / 0.89 °C | 0.08 / 0.17 °C |
+| | Plain thermostat | SmartHeat | SmartHeat without return sensor |
+|---|---|---|---|
+| Underfloor heating | 0.60 / 1.22 °C | 0.15 / 0.35 °C | 0.19 / 0.97 °C |
+| Radiators | 0.36 / 0.89 °C | 0.08 / 0.17 °C | 0.13 / 0.57 °C |
 
 The learned values match the model: β ≈ 2.0 for the floor (the true capacity ratio is 1.8), and h ≈ 4.1 °C (true 4.2 °C).
 
 The trade-off: because the room peaks *at* the target, its average is a little below the target (about 0.2–0.3 °C in the simulation).
 
 To print these numbers yourself, run `python tests/unit/test_simulation.py`.
+
+### Radiators without a return sensor
+
+The return sensor is required for underfloor heating and optional for radiators. A radiator holds little heat, so closing early by the average overshoot works well enough: in the simulation, radiators without a return sensor peak 0.13 °C from the target on average and at most 0.57 °C above it, against 0.08 / 0.17 °C with one and 0.36 / 0.89 °C with a plain thermostat. A floor holds much more heat, and how much varies, so without the return temperature its worst peaks stay close to a plain thermostat's (0.97 against 1.22 °C).
+
+A radiator zone without a return sensor does without:
+
+- the learned β and h: it always closes early by the average overshoot
+- the safety close at the maximum return temperature
+- the frost protection backup: if the room sensor is gone, the valve closes after the room sensor timeout and stays closed until the sensor is back
+- loop saturation detection (supply and return almost equally warm); a supply sensor alone still notices when no hot water is available
+- the heat storage factor, holding difference and supply-return difference sensors
 
 ## Installation
 
@@ -74,14 +86,14 @@ SmartHeat installs through [HACS](https://hacs.xyz):
 
 ## Settings
 
-The system type sets the defaults. Every setting can be changed later under the zone's **Configure** button, along with the entities.
+The system type sets the defaults. Every setting can be changed later under the zone's **Configure** button, along with the entities. A radiator zone can add or remove its return sensor there too.
 
 | Setting | Underfloor | Radiators |
 |---|---|---|
 | Hysteresis (opens this far below target) | 0.3 °C | 0.3 °C |
 | Minimum open / closed time | 15 / 15 min | 5 / 5 min |
 | Coast window (longest wait for the peak) | 240 min | 60 min |
-| Maximum return temperature | 45 °C | 75 °C |
+| Maximum return temperature (with a return sensor) | 45 °C | 75 °C |
 | Room sensor timeout | 30 min | 30 min |
 | Frost protection | 7 °C | 7 °C |
 | Eco / away preset | 19 / 16 °C | 19 / 16 °C |
@@ -96,10 +108,10 @@ Each zone is a device with one climate entity. When you add a zone, its device i
 - **Attributes:** these explain what the controller is doing.
   - `reason`: why the valve is open or closed right now
   - `predicted_overshoot` and `close_threshold`
-  - `trained`: true once β and h are learned; the prediction then uses them whenever the return temperature is known, and the plain average otherwise
+  - `trained`: true once β and h are learned; the prediction then uses them whenever the return temperature is known, and the plain average otherwise. Always false without a return sensor.
   - `coasting`
-  - `return_temperature`
-  - with a supply sensor, also: `supply_temperature`, `supply_return_delta`, `no_heat_source` and `loop_saturated`
+  - `return_temperature` (null without a return sensor)
+  - with a supply sensor, also: `supply_temperature` and `no_heat_source`, plus `supply_return_delta` and `loop_saturated` when the zone also has a return sensor
 - **Configuration attributes:** how the zone is set up, for dashboards and templates. They only change with the settings, so the recorder leaves them out.
   - `system_type`: `underfloor` or `radiator`
   - `valve_entity_id`, `room_sensor_entity_id`, `return_sensor_entity_id`, `supply_sensor_entity_id` and `window_sensor_entity_id` (null when the zone has no such sensor)
@@ -111,13 +123,15 @@ Each zone also has diagnostic sensors. Graph them to watch the learning:
 | Sensor | Meaning |
 |---|---|
 | Learned overshoot | Average overshoot measured after closing |
-| Heat storage factor | β |
-| Holding difference | h |
+| Heat storage factor | β; only with a return sensor |
+| Holding difference | h; only with a return sensor |
 | Learning cycles | Number of cycles learned from |
 | Last peak vs target | How far the last peak landed from the target; should settle near 0 |
 | Heat-up rate | Room warm-up rate while the valve is open (°C/h) |
 | Valve open (24 h) | Share of the last 24 hours the valve was open |
-| Supply-return difference | Only with a supply sensor |
+| Supply-return difference | Only with both a supply and a return sensor |
+
+Removing the supply or return sensor in the settings also removes the sensors that need it. Adding it back brings them back under the same entity IDs, so their history continues.
 
 The service `smartheat.reset_learning` makes a zone forget what it has learned.
 
@@ -132,7 +146,7 @@ node dashboard/heating_dashboard.mjs --url http://homeassistant.local:8123 --tok
 - Add `--dry-run` to see the dashboard without saving anything.
 - `HA_URL` and `HA_TOKEN` can replace `--url` and `--token-file`. The token is never printed or saved, and files ending in `.token.txt` are ignored by git.
 - If the dashboard was edited in Home Assistant since the last run, the script stops instead of overwriting the edits. `--force` overwrites them.
-- Run it again after adding, removing or renaming a zone, or after upgrading SmartHeat.
+- Run it again after adding, removing or renaming a zone, after changing a zone's sensors, or after upgrading SmartHeat.
 
 All options are described in [dashboard/README.md](dashboard/README.md).
 

@@ -101,9 +101,11 @@ let zoneCounter = 0;
 
 // A SmartHeat zone: config entry, device, climate entity and diagnostic sensors, plus the
 // valve and sensors it controls. version 1 is SmartHeat 0.1.0 (no configuration attributes,
-// no model_id, no area); version 2 is SmartHeat 0.2.0.
+// no model_id, no area); version 2 is SmartHeat 0.2.0. ret false is a radiator zone without a
+// return sensor (SmartHeat 0.3.0): it has no sensors that need the return temperature, and its
+// prediction is never trained.
 function addZone(snap, {
-  id, name, system = "underfloor", version = 2, area = null, deviceArea = true, supply = false,
+  id, name, system = "underfloor", version = 2, area = null, deviceArea = true, supply = false, ret = true,
   window = null, invert = false, valveDomain = "switch", state = "heat", restored = false,
   entryId = `01ZONE${String(++zoneCounter).padStart(20, "0")}`,
 }) {
@@ -119,13 +121,13 @@ function addZone(snap, {
   const inputs = {
     valve: `${valveDomain}.${id}_valve`,
     room: `sensor.${id}_temperature`,
-    ret: `sensor.${id}_return_temperature`,
+    ret: ret ? `sensor.${id}_return_temperature` : null,
     supply: supply ? `sensor.${id}_supply_temperature` : null,
     window: window ? `binary_sensor.${id}_${window}` : null,
   };
   addEntity(snap, inputs.valve, valveDomain === "valve" ? "open" : "on", { friendly_name: `${name} valve` }, { platform: "demo", unique_id: `${id}-valve` });
   addEntity(snap, inputs.room, "21.2", { ...TEMPERATURE, friendly_name: `${name} temperature` }, { platform: "demo", unique_id: `${id}-room`, area_id: area });
-  addEntity(snap, inputs.ret, "30.1", { ...TEMPERATURE, friendly_name: `${name} return` });
+  if (ret) addEntity(snap, inputs.ret, "30.1", { ...TEMPERATURE, friendly_name: `${name} return` });
   if (supply) addEntity(snap, inputs.supply, "35.0", { ...TEMPERATURE, friendly_name: `${name} supply` }, { platform: "demo", unique_id: `${id}-supply` });
   if (window) addEntity(snap, inputs.window, "off", { device_class: window, friendly_name: `${name} ${window}` }, { platform: "demo", unique_id: `${id}-${window}` });
 
@@ -133,15 +135,20 @@ function addZone(snap, {
     hvac_modes: ["heat", "off"], min_temp: 5.0, max_temp: 28.0, target_temp_step: 0.5,
     preset_modes: ["none", "eco", "away", "frost"], current_temperature: 21.2, temperature: 21.5,
     hvac_action: "heating", preset_mode: "none", comfort_temperature: 21.5, reason: "heating",
-    predicted_overshoot: 0.3, close_threshold: 21.2, coasting: false, return_temperature: 30.1,
+    predicted_overshoot: 0.3, close_threshold: 21.2, coasting: false, return_temperature: ret ? 30.1 : null,
     friendly_name: name, supported_features: 401,
   };
-  if (supply) Object.assign(attributes, { supply_temperature: 35.0, supply_return_delta: 4.9, no_heat_source: false, loop_saturated: false });
+  // Without a return sensor, SmartHeat leaves out the attributes that compare supply and return
+  if (supply) {
+    Object.assign(attributes, ret
+      ? { supply_temperature: 35.0, supply_return_delta: 4.9, no_heat_source: false, loop_saturated: false }
+      : { supply_temperature: 35.0, no_heat_source: false });
+  }
   if (version >= 2) {
     Object.assign(attributes, {
       system_type: system, valve_entity_id: inputs.valve, room_sensor_entity_id: inputs.room,
       return_sensor_entity_id: inputs.ret, supply_sensor_entity_id: inputs.supply,
-      window_sensor_entity_id: inputs.window, invert_valve: invert, trained: true, ...TUNING[system],
+      window_sensor_entity_id: inputs.window, invert_valve: invert, trained: ret, ...TUNING[system],
     });
   }
   // A zone that failed to load keeps its restored state
@@ -151,6 +158,7 @@ function addZone(snap, {
   addEntity(snap, `climate.${id}`, zoneState, attributes, { ...zoneRow, unique_id: `${entryId}_climate` });
   for (const [role, suffix, value, unit, stateClass] of DIAGNOSTICS) {
     if (role === "supply_return_difference" && !supply) continue;
+    if (!ret && ["heat_storage_factor", "holding_difference", "supply_return_difference"].includes(role)) continue;
     const attrs = { state_class: stateClass, friendly_name: `${name} ${suffix}` };
     if (unit) attrs.unit_of_measurement = unit;
     addEntity(snap, `sensor.${id}_${suffix}`, restored ? "unavailable" : value, attrs, { ...zoneRow, unique_id: `${entryId}_${role}`, entity_category: "diagnostic" });
@@ -194,6 +202,12 @@ const sectionTitles = (view) => view.sections.map((s) => (s.cards[0].type === "h
 const findSection = (view, title) => view.sections.find((s) => s.cards[0].heading === title);
 const viewByPath = (config, p) => config.views.find((v) => v.path === p);
 
+// The row labels of a zone's controller table. Every table starts with these rows and ends
+// with Prediction; the water rows in between depend on the zone's sensors.
+const controllerRows = (view) => findSection(view, "Controller").cards[1].content.split("\n")
+  .filter((line) => line.startsWith("| ")).map((line) => line.slice(2, line.indexOf(" |")));
+const FIRST_ROWS = ["Decision", "Valve", "Target now", "Comfort target", "Predicted overshoot", "Valve closes at", "Coasting"];
+
 // ------------------------------------------------------------------ building
 
 describe("buildDashboard", () => {
@@ -223,6 +237,8 @@ describe("buildDashboard", () => {
       { action: "navigate", navigation_path: "/_my_redirect/config_flow_start?domain=smartheat" },
       { action: "url", url_path: DOCS },
     ]);
+    // The checklist asks for a return sensor only for underfloor heating (SmartHeat 0.3.0)
+    assert.ok(start.cards[1].content.includes("\n- for underfloor heating, a **return temperature sensor** on the return pipe at the end of the loop (optional for radiators)\n"));
     // supported_features 3: hourly feature on the tile, daily forecast card
     assert.deepEqual(side.cards[1].features, [{ type: "temperature-forecast", forecast_type: "hourly", hours_to_show: 24, show_labels: true }]);
     assert.equal(side.cards[2].forecast_type, "daily");
@@ -334,7 +350,10 @@ describe("buildDashboard", () => {
     ]);
     assert.ok(stue.header.card.content.includes("lets the floor carry the room"));
     assert.ok(stue.header.card.content.includes("> No hot water is reaching the loop"));
-    assert.ok(stue.sections[2].cards[1].content.includes("| Supply water |"));
+    assert.ok(stue.header.card.content.includes("> Supply and return are almost equally warm"));
+    assert.deepEqual(controllerRows(stue), [
+      ...FIRST_ROWS, "Return water", "Supply water", "Supply − return", "Hot water arriving", "Loop saturated", "Prediction",
+    ]);
 
     const bath = viewByPath(config, "zone-badevaerelse");
     const valveRow = findSection(bath, "Sensors and valve").cards[1].entities[0];
@@ -350,6 +369,122 @@ describe("buildDashboard", () => {
       { entity: "sensor.stue_holding_difference", name: "Stue" },
       { entity: "sensor.badevaerelse_holding_difference", name: "Badeværelse" },
       { entity: "sensor.outdoor_temperature", name: "Outdoor" },
+    ]);
+  });
+
+  test("radiator zones without a return sensor (SmartHeat 0.3.0): no return water, no learned model", () => {
+    const snap = newSnapshot({ areas: ["kokken", "kontor"] });
+    addOutdoorHelper(snap);
+    addZone(snap, { id: "kokken", name: "Køkken", system: "radiator", area: "kokken", ret: false });
+    addZone(snap, { id: "kontor", name: "Kontor", system: "radiator", area: "kontor", ret: false, supply: true });
+    const { config, warnings, zones } = build(snap);
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(zones.map((z) => [z.path, z.learned, z.inputs, z.tuning]), [["zone-kokken", 5, 2, 8], ["zone-kontor", 5, 3, 8]]);
+    const learned = ["Learned overshoot", "Last peak vs target", "Heat-up rate", "Learning cycles", "Valve open (24 h)"];
+    const tuning = [
+      "Current tuning", "hysteresis", "min_open_minutes", "min_closed_minutes", "coast_window_minutes",
+      "sensor_timeout_minutes", "eco_temp", "away_temp", "frost_temp",
+    ];
+
+    // No sensor on the pipes: no water chart, and without the holding difference no chart
+    // against the outdoor temperature
+    const kitchen = viewByPath(config, "zone-kokken");
+    assert.deepEqual(sectionTitles(kitchen), [
+      "thermostat", "Room vs target, last 24 h", "Controller", "Sensors and valve", "What SmartHeat has learned",
+      "Overshoot learning, last 14 days", "Valve open per day", "Settings",
+    ]);
+    assert.deepEqual(controllerRows(kitchen), [...FIRST_ROWS, "Prediction"]);
+    assert.deepEqual(findSection(kitchen, "Sensors and valve").cards[1].entities.map((r) => r.name), ["Valve", "Room temperature"]);
+    assert.deepEqual(findSection(kitchen, "What SmartHeat has learned").cards[1].entities.map((r) => r.name), learned);
+    assert.deepEqual(findSection(kitchen, "Settings").cards[1].entities.slice(3).map((r) => r.attribute ?? r.label), tuning);
+    assert.ok(!kitchen.header.card.content.includes("[!WARNING]"), "no supply sensor, so no hot-water warning");
+
+    // A supply sensor alone: the water chart shows the supply, and the table keeps the rows
+    // that need no return temperature
+    const office = viewByPath(config, "zone-kontor");
+    assert.deepEqual(sectionTitles(office), [
+      "thermostat", "Room vs target, last 24 h", "Controller", "Sensors and valve", "Water temperatures, last 24 h",
+      "What SmartHeat has learned", "Overshoot learning, last 14 days", "Valve open per day", "Settings",
+    ]);
+    assert.deepEqual(controllerRows(office), [...FIRST_ROWS, "Supply water", "Hot water arriving", "Prediction"]);
+    assert.deepEqual(findSection(office, "Sensors and valve").cards[1].entities.map((r) => r.name), ["Valve", "Room temperature", "Supply water"]);
+    assert.deepEqual(findSection(office, "Water temperatures, last 24 h").cards[1].entities, [
+      { entity: "switch.kontor_valve", name: "Valve" },
+      { entity: "sensor.kontor_supply_temperature", name: "Supply" },
+    ]);
+    assert.deepEqual(findSection(office, "What SmartHeat has learned").cards[1].entities.map((r) => r.name), learned);
+    assert.deepEqual(findSection(office, "Settings").cards[1].entities.slice(3).map((r) => r.attribute ?? r.label), tuning);
+    assert.ok(office.header.card.content.includes("> No hot water is reaching the loop"));
+    assert.ok(!office.header.card.content.includes("loop_saturated"), "no return sensor, so no loop saturated note");
+
+    // Compare has no holding difference or heat storage factor chart
+    assert.deepEqual(viewByPath(config, "compare").sections.map((s) => s.cards[0].title), [
+      "Last peak vs target, 14 days", "Learned overshoot, 14 days", "Valve open per day, 30 days", "Heat-up rate, 14 days",
+    ]);
+
+    // The order of states and registry rows does not matter
+    const shuffled = structuredClone(snap);
+    for (const key of ["get_states", "config/entity_registry/list", "config/device_registry/list", "config_entries/get"]) shuffled[key].reverse();
+    assert.equal(JSON.stringify(build(shuffled).config), JSON.stringify(config));
+  });
+
+  test("a zone without the return sensor attribute (SmartHeat 0.1.0) has a return sensor", () => {
+    const snap = newSnapshot();
+    addOutdoorHelper(snap);
+    addZone(snap, { id: "kokken", name: "Køkken", system: "radiator", version: 1, area: "kokken" });
+    addZone(snap, { id: "stue", name: "Stue", system: "radiator", area: "stue", ret: false });
+    const { config } = build(snap);
+    assert.deepEqual(controllerRows(viewByPath(config, "zone-kokken")), [...FIRST_ROWS, "Return water", "Prediction"]);
+    assert.deepEqual(controllerRows(viewByPath(config, "zone-stue")), [...FIRST_ROWS, "Prediction"]);
+
+    // Compare shows the holding difference and heat storage factor of the zones that have them
+    const compare = viewByPath(config, "compare");
+    const chart = (title) => compare.sections.find((s) => s.cards[0].title === title).cards[0].entities;
+    assert.deepEqual(chart("Holding difference vs outdoor, 60 days"), [
+      { entity: "sensor.kokken_holding_difference", name: "Køkken" },
+      { entity: "sensor.outdoor_temperature", name: "Outdoor" },
+    ]);
+    assert.deepEqual(chart("Heat storage factor, 14 days"), [{ entity: "sensor.kokken_heat_storage_factor", name: "Køkken" }]);
+    assert.deepEqual(chart("Heat-up rate, 14 days").map((e) => e.name), ["Stue", "Køkken"]);
+  });
+
+  test("an unavailable or deleted water sensor keeps its controller rows, and the water chart shows the ones that exist", () => {
+    const snap = newSnapshot({ areas: [] });
+    addZone(snap, { id: "a", name: "Alpha", supply: true });
+    addZone(snap, { id: "b", name: "Beta", supply: true });
+    addZone(snap, { id: "c", name: "Gamma", system: "radiator", ret: false, supply: true });
+    // Alpha's return sensor is unavailable, and Beta's return sensor and Gamma's supply sensor
+    // are deleted. SmartHeat then has no reading from them.
+    const state = (id) => snap.get_states.find((s) => s.entity_id === id);
+    state("sensor.a_return_temperature").state = "unavailable";
+    snap.get_states = snap.get_states.filter((s) => !["sensor.b_return_temperature", "sensor.c_supply_temperature"].includes(s.entity_id));
+    for (const id of ["climate.a", "climate.b"]) Object.assign(state(id).attributes, { return_temperature: null, supply_return_delta: null });
+    state("climate.c").attributes.supply_temperature = null;
+    const { config } = build(snap);
+
+    // The return sensor is still configured: the return rows, the loop saturated note and the
+    // maximum return temperature stay
+    for (const p of ["zone-alpha", "zone-beta"]) {
+      const view = viewByPath(config, p);
+      assert.deepEqual(controllerRows(view), [
+        ...FIRST_ROWS, "Return water", "Supply water", "Supply − return", "Hot water arriving", "Loop saturated", "Prediction",
+      ]);
+      assert.ok(view.header.card.content.includes("> Supply and return are almost equally warm"));
+      assert.ok(findSection(view, "Settings").cards[1].entities.some((r) => r.attribute === "max_return_temp"));
+    }
+    assert.deepEqual(controllerRows(viewByPath(config, "zone-gamma")), [...FIRST_ROWS, "Supply water", "Hot water arriving", "Prediction"]);
+
+    // The water chart keeps an unavailable sensor and leaves out a deleted one. Without a water
+    // sensor left, there is no chart.
+    const water = (p) => findSection(viewByPath(config, p), "Water temperatures, last 48 h").cards[1].entities;
+    assert.deepEqual(water("zone-alpha").map((e) => e.name), ["Valve", "Return", "Supply"]);
+    assert.deepEqual(water("zone-beta"), [
+      { entity: "switch.b_valve", name: "Valve" },
+      { entity: "sensor.b_supply_temperature", name: "Supply" },
+    ]);
+    assert.deepEqual(sectionTitles(viewByPath(config, "zone-gamma")), [
+      "thermostat", "Room vs target, last 24 h", "Controller", "Sensors and valve", "What SmartHeat has learned",
+      "Overshoot learning, last 14 days", "Valve open per day", "Settings",
     ]);
   });
 

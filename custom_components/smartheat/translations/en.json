@@ -18,14 +18,15 @@
           "system_type": "Sets sensible defaults for valve timing and safety limits.",
           "valve": "Switch, input boolean or valve that lets hot water into this zone.",
           "room_sensor": "Measures the room the zone heats.",
-          "return_sensor": "Measures the water at the end of the loop, on the return pipe.",
+          "return_sensor": "Measures the water at the end of the loop, on the return pipe. Needed for underfloor heating, optional for radiators.",
           "supply_sensor": "Optional. Measures the water going in, to notice when no hot water is available.",
           "window_sensor": "Optional. The valve stays closed while it is open."
         }
       }
     },
     "error": {
-      "same_sensor": "The room and return sensors must be different entities."
+      "same_sensor": "The room and return sensors must be different entities.",
+      "return_required": "Underfloor heating needs a return temperature sensor."
     },
     "abort": {
       "already_configured": "This valve is already used by a SmartHeat zone."
@@ -55,18 +56,20 @@
           "sensor_timeout_minutes": "Room sensor timeout"
         },
         "data_description": {
+          "return_sensor": "Needed for underfloor heating, optional for radiators.",
           "invert_valve": "Turn on for a normally open actuator, where switching on closes the valve.",
           "frost_temp": "The valve opens below this temperature, even when the zone is off.",
           "hysteresis": "The valve opens when the room is this much below the target.",
           "min_open_minutes": "Thermal actuators need a few minutes to open fully.",
           "coast_window_minutes": "How long to wait for the room to peak after an early close.",
-          "max_return_temp": "The valve closes above this, for example to protect the floor.",
+          "max_return_temp": "The valve closes above this, for example to protect the floor. Only used with a return sensor.",
           "sensor_timeout_minutes": "The valve closes when the room sensor has been unavailable this long."
         }
       }
     },
     "error": {
       "same_sensor": "The room and return sensors must be different entities.",
+      "return_required": "Underfloor heating needs a return temperature sensor.",
       "min_above_max": "The minimum temperature must be below the maximum."
     },
     "abort": {

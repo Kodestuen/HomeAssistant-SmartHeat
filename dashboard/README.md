@@ -17,6 +17,8 @@ A notice at the top appears whenever the zones running in Home Assistant differ 
 
 The "Sensors and valve" and "Water temperatures" sections need SmartHeat 0.2.0 or newer. With 0.1.0 they are left out, and the rest of the page works.
 
+Since SmartHeat 0.3.0, a radiator zone may have no return sensor. Its page then leaves out everything that needs the return temperature: the return water temperature, the supply-return difference, the loop saturated status, the maximum return temperature setting, and the heat storage factor and holding difference with their charts. Its controller table always shows the prediction as "Average of past cycles", and the water temperatures chart appears only when the zone has a supply sensor.
+
 ## Requirements
 
 - Node.js 22 or newer. No npm packages are needed.
@@ -69,7 +71,7 @@ The guard also stops a run when the state file is missing but the dashboard alre
 
 ## Optional: an Outdoor temperature helper
 
-With an outdoor temperature sensor, the overview gets an outdoor temperature tile, and each zone page gets a chart of the holding difference against the outdoor temperature. Create the helper early: the chart uses long-term statistics, which take days to build up.
+With an outdoor temperature sensor, the overview gets an outdoor temperature tile, and each zone page with a return sensor gets a chart of the holding difference against the outdoor temperature. Create the helper early: the chart uses long-term statistics, which take days to build up.
 
 1. Go to **Settings → Devices & services → Helpers → Create helper → Template → Sensor**.
 2. Name it `Outdoor temperature`. The generator finds the helper by this name.

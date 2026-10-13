@@ -66,7 +66,7 @@ ENTITIES_SCHEMA = {
         selector.EntitySelectorConfig(domain=["switch", "input_boolean", "valve"])
     ),
     vol.Required(CONF_ROOM_SENSOR): TEMPERATURE_SENSOR,
-    vol.Required(CONF_RETURN_SENSOR): TEMPERATURE_SENSOR,
+    vol.Optional(CONF_RETURN_SENSOR): TEMPERATURE_SENSOR,
     vol.Optional(CONF_SUPPLY_SENSOR): TEMPERATURE_SENSOR,
     vol.Optional(CONF_WINDOW_SENSOR): selector.EntitySelector(
         selector.EntitySelectorConfig(domain="binary_sensor")
@@ -110,10 +110,14 @@ OPTIONS_SCHEMA = vol.Schema(
 )
 
 
-def _validate(data: dict[str, Any]) -> dict[str, str]:
+def _validate(data: dict[str, Any], system_type: str) -> dict[str, str]:
     errors: dict[str, str] = {}
-    if data[CONF_ROOM_SENSOR] == data[CONF_RETURN_SENSOR]:
-        errors[CONF_RETURN_SENSOR] = "same_sensor"
+    if CONF_RETURN_SENSOR in data:
+        if data[CONF_ROOM_SENSOR] == data[CONF_RETURN_SENSOR]:
+            errors[CONF_RETURN_SENSOR] = "same_sensor"
+    elif system_type == SYSTEM_UNDERFLOOR:
+        # The heat a floor stores varies too much to close early by an average alone
+        errors[CONF_RETURN_SENSOR] = "return_required"
     if CONF_MIN_TEMP in data and data[CONF_MIN_TEMP] >= data[CONF_MAX_TEMP]:
         errors[CONF_MAX_TEMP] = "min_above_max"
     return errors
@@ -131,7 +135,7 @@ class SmartHeatConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             self._async_abort_entries_match({CONF_VALVE: user_input[CONF_VALVE]})
-            if not (errors := _validate(user_input)):
+            if not (errors := _validate(user_input, user_input[CONF_SYSTEM_TYPE])):
                 settings = dict(user_input)
                 name = settings.pop(CONF_NAME)
                 system_type = settings.pop(CONF_SYSTEM_TYPE)
@@ -165,7 +169,8 @@ class SmartHeatOptionsFlow(OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             self._async_abort_entries_match({CONF_VALVE: user_input[CONF_VALVE]})
-            if not (errors := _validate(user_input)):
+            system_type = self.config_entry.data[CONF_SYSTEM_TYPE]
+            if not (errors := _validate(user_input, system_type)):
                 return self.async_create_entry(data=user_input)
         return self.async_show_form(
             step_id="init",

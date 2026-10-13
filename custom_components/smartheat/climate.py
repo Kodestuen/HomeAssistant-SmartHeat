@@ -156,7 +156,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         self._store = entry.runtime_data.store
         self._valve: str = config[CONF_VALVE]
         self._room_sensor: str = config[CONF_ROOM_SENSOR]
-        self._return_sensor: str = config[CONF_RETURN_SENSOR]
+        self._return_sensor: str | None = config.get(CONF_RETURN_SENSOR)
         self._supply_sensor: str | None = config.get(CONF_SUPPLY_SENSOR)
         self._window_sensor: str | None = config.get(CONF_WINDOW_SENSOR)
         self._invert: bool = config[CONF_INVERT_VALVE]
@@ -172,7 +172,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             ATTR_SYSTEM_TYPE: config[CONF_SYSTEM_TYPE],
             ATTR_VALVE_ENTITY_ID: self._valve,
             ATTR_ROOM_SENSOR_ENTITY_ID: self._room_sensor,
-            ATTR_RETURN_SENSOR_ENTITY_ID: self._return_sensor,
+            ATTR_RETURN_SENSOR_ENTITY_ID: self._return_sensor or None,
             ATTR_SUPPLY_SENSOR_ENTITY_ID: self._supply_sensor or None,
             ATTR_WINDOW_SENSOR_ENTITY_ID: self._window_sensor or None,
             CONF_INVERT_VALVE: self._invert,
@@ -222,14 +222,17 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
                 decision.predicted_overshoot if decision else None
             ),
             "close_threshold": _round(decision.close_threshold if decision else None),
-            "trained": controller.model.trained,
+            # Without a return sensor the prediction is always the average
+            "trained": controller.model.trained and bool(self._return_sensor),
             "coasting": controller.coasting,
             "return_temperature": self._return,
         }
         if self._supply_sensor:
             attributes["supply_temperature"] = self._supply
-            attributes["supply_return_delta"] = _round(controller.supply_return_delta)
             attributes["no_heat_source"] = controller.no_heat_source
+        if self._supply_sensor and self._return_sensor:
+            # These compare the supply with the return, so they need both sensors
+            attributes["supply_return_delta"] = _round(controller.supply_return_delta)
             attributes["loop_saturated"] = controller.loop_saturated
         attributes.update(self._config_attributes)
         return attributes

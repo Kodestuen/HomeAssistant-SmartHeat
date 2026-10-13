@@ -283,6 +283,10 @@ function discoverZones(S) {
       state: S.states.get(roles.climate).state,
     };
     zone.hasSupply = Boolean(zone.supply || "supply_temperature" in a || roles.supply_return_difference);
+    // SmartHeat 0.3.0 sets the attribute to null for a radiator zone without a return sensor.
+    // SmartHeat 0.1.0 has no such attribute, and always a return sensor.
+    zone.hasReturn = a.return_sensor_entity_id !== null;
+    if (!zone.hasReturn) zone.tuning = zone.tuning.filter(([attr]) => attr !== "max_return_temp"); // nothing to limit
     zone.area = S.entityById.get(zone.climate)?.area_id ?? device?.area_id ?? (zone.room ? effectiveArea(S, zone.room) : null);
     if (zone.state === "unavailable" || zone.state === "unknown") {
       warnings.push(`Zone "${name}" is ${zone.state}, so its page may lack details. Re-run when the zone responds again.`);
@@ -474,12 +478,17 @@ function T4(z) {
       "> [!WARNING]",
       "> No hot water is reaching the loop: the supply pipe is barely warmer than the room. Check that the boiler or heat pump is running.",
       "",
-      "{% endif %}{% if state_attr(e, 'loop_saturated') %}",
-      "> [!NOTE]",
-      "> Supply and return are almost equally warm: the loop is giving the room all the heat it can.",
-      "",
-      "{% endif %}",
     );
+    // The loop saturated note needs both sensors, like its row in T5
+    if (z.hasReturn) {
+      lines.push(
+        "{% endif %}{% if state_attr(e, 'loop_saturated') %}",
+        "> [!NOTE]",
+        "> Supply and return are almost equally warm: the loop is giving the room all the heat it can.",
+        "",
+      );
+    }
+    lines.push("{% endif %}");
   }
   if (z.roles.learning_cycles) {
     lines.push(
@@ -508,15 +517,14 @@ function T5(z) {
     "| Predicted overshoot | {{ deg(state_attr(e, 'predicted_overshoot'), 2) }} |",
     "| Valve closes at | {{ deg(state_attr(e, 'close_threshold'), 2) }} |",
     "| Coasting | {{ ('Yes' if state_attr(e, 'coasting') else 'No') if ok else '–' }} |",
-    "| Return water | {{ deg(state_attr(e, 'return_temperature'), 1) }} |",
   ];
+  if (z.hasReturn) rows.push("| Return water | {{ deg(state_attr(e, 'return_temperature'), 1) }} |");
+  // Supply − return and Loop saturated need both sensors
   if (z.hasSupply) {
-    rows.push(
-      "| Supply water | {{ deg(state_attr(e, 'supply_temperature'), 1) }} |",
-      "| Supply − return | {{ deg(state_attr(e, 'supply_return_delta'), 1) }} |",
-      "| Hot water arriving | {{ ('No' if state_attr(e, 'no_heat_source') else 'Yes') if ok else '–' }} |",
-      "| Loop saturated | {{ ('Yes' if state_attr(e, 'loop_saturated') else 'No') if ok else '–' }} |",
-    );
+    rows.push("| Supply water | {{ deg(state_attr(e, 'supply_temperature'), 1) }} |");
+    if (z.hasReturn) rows.push("| Supply − return | {{ deg(state_attr(e, 'supply_return_delta'), 1) }} |");
+    rows.push("| Hot water arriving | {{ ('No' if state_attr(e, 'no_heat_source') else 'Yes') if ok else '–' }} |");
+    if (z.hasReturn) rows.push("| Loop saturated | {{ ('Yes' if state_attr(e, 'loop_saturated') else 'No') if ok else '–' }} |");
   }
   rows.push(
     "{%- set tr = state_attr(e, 'trained') -%}",
@@ -537,7 +545,7 @@ const S1 = [
   "Each zone needs:",
   "- a **valve**: the switch, input boolean or valve entity that lets hot water into the loop or radiators",
   "- a **room temperature sensor** in the room",
-  "- a **return temperature sensor** on the return pipe at the end of the loop",
+  "- for underfloor heating, a **return temperature sensor** on the return pipe at the end of the loop (optional for radiators)",
   "",
   "Optional:",
   "- a **supply temperature sensor** on the flow pipe, to notice when no hot water arrives",
@@ -785,11 +793,12 @@ function zoneView(S, z, ctx) {
     });
   }
 
-  // Z5 water temperatures (SmartHeat 0.2.0)
-  if (z.ret) {
+  // Z5 water temperatures (SmartHeat 0.2.0): whichever water sensors are usable, as a radiator
+  // zone may have no return sensor and a configured one may be deleted or disabled
+  if (z.ret || z.supply) {
     const water = [];
     if (z.valve) water.push({ entity: z.valve, name: valveLabel(z) });
-    water.push({ entity: z.ret, name: "Return" });
+    if (z.ret) water.push({ entity: z.ret, name: "Return" });
     if (z.supply) water.push({ entity: z.supply, name: "Supply" });
     sections.push({
       type: "grid", column_span: 1,

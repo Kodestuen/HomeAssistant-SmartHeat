@@ -18,14 +18,15 @@
           "system_type": "Giver fornuftige standardværdier for ventiltider og sikkerhedsgrænser.",
           "valve": "Kontakt, input boolean eller ventil, der lukker varmt vand ind i zonen.",
           "room_sensor": "Måler temperaturen i det rum, zonen opvarmer.",
-          "return_sensor": "Måler vandet for enden af kredsen, på returrøret.",
+          "return_sensor": "Måler vandet for enden af kredsen, på returrøret. Nødvendig ved gulvvarme, valgfri ved radiatorer.",
           "supply_sensor": "Valgfri. Måler vandet, der løber ind, så det kan ses, når der ikke er varmt vand.",
           "window_sensor": "Valgfri. Ventilen holdes lukket, mens den er åben."
         }
       }
     },
     "error": {
-      "same_sensor": "Rumføler og returføler skal være to forskellige enheder."
+      "same_sensor": "Rumføler og returføler skal være to forskellige enheder.",
+      "return_required": "Gulvvarme kræver en returtemperaturføler."
     },
     "abort": {
       "already_configured": "Denne ventil bruges allerede af en SmartHeat-zone."
@@ -55,18 +56,20 @@
           "sensor_timeout_minutes": "Timeout for rumføler"
         },
         "data_description": {
+          "return_sensor": "Nødvendig ved gulvvarme, valgfri ved radiatorer.",
           "invert_valve": "Slå til for en normalt åben aktuator, hvor tænd lukker ventilen.",
           "frost_temp": "Ventilen åbner under denne temperatur, også når zonen er slukket.",
           "hysteresis": "Ventilen åbner, når rummet er så meget under måltemperaturen.",
           "min_open_minutes": "Termiske aktuatorer skal bruge et par minutter på at åbne helt.",
           "coast_window_minutes": "Hvor længe der ventes på, at rummet topper efter en tidlig lukning.",
-          "max_return_temp": "Ventilen lukker over denne temperatur, fx for at beskytte gulvet.",
+          "max_return_temp": "Ventilen lukker over denne temperatur, fx for at beskytte gulvet. Bruges kun med en returføler.",
           "sensor_timeout_minutes": "Ventilen lukker, når rumføleren har været utilgængelig så længe."
         }
       }
     },
     "error": {
       "same_sensor": "Rumføler og returføler skal være to forskellige enheder.",
+      "return_required": "Gulvvarme kræver en returtemperaturføler.",
       "min_above_max": "Laveste temperatur skal være under højeste temperatur."
     },
     "abort": {

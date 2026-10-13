@@ -10,8 +10,8 @@ manifold drifts toward its surroundings instead.
 
 The scenario has a night setback (19 °C at night, 21 °C from 06:00 to 22:00) and
 weather that changes over the days, which is when an on/off thermostat overshoots.
-The tests compare the learned controller with a plain thermostat that closes at the
-target.
+The tests compare the learned controller, also without a return sensor, with a plain
+thermostat that closes at the target.
 """
 
 from __future__ import annotations
@@ -143,6 +143,7 @@ def simulate(
     model: OvershootModel,
     days: float = 10,
     measure_from_day: float = 4,
+    return_sensor: bool = True,
 ) -> Result:
     """Run the closed loop; measure the true room peak of every closed period."""
     plant = replace(plant)
@@ -164,7 +165,7 @@ def simulate(
         decision = controller.update(
             Inputs(
                 room=room,
-                return_temp=ret,
+                return_temp=ret if return_sensor else None,
                 target=target,
                 valve_open=valve,
                 valve_changed_at=changed_at,
@@ -213,18 +214,37 @@ def test_learning_beats_plain_thermostat(plant, config, initial):
     assert learned.mean_comfort_error > -0.4
 
 
+def test_radiators_do_well_without_return_sensor():
+    """A radiator stores little heat, so the average overshoot alone gets close."""
+    plain = simulate(RADIATOR, RADIATOR_CONFIG, FixedModel(initial_overshoot=0.0))
+    learned = simulate(
+        RADIATOR,
+        RADIATOR_CONFIG,
+        OvershootModel(initial_overshoot=0.2),
+        return_sensor=False,
+    )
+
+    assert len(learned.peak_errors) >= 10
+    assert learned.model.beta is None
+    assert learned.model.holding_delta is None
+    assert learned.mean_abs_peak_error < plain.mean_abs_peak_error / 2
+    assert learned.worst_peak_error < plain.worst_peak_error * 0.8
+    assert learned.mean_comfort_error > -0.4
+
+
 # python tests/unit/test_simulation.py prints the README table
 if __name__ == "__main__":
     for case in CASES:
         plant, config, initial = case.values
-        for label, model in (
-            ("plain", FixedModel(initial_overshoot=0.0)),
-            ("learned", OvershootModel(initial_overshoot=initial)),
+        for label, model, return_sensor in (
+            ("plain", FixedModel(initial_overshoot=0.0), True),
+            ("learned", OvershootModel(initial_overshoot=initial), True),
+            ("learned, no return", OvershootModel(initial_overshoot=initial), False),
         ):
-            r = simulate(plant, config, model)
+            r = simulate(plant, config, model, return_sensor=return_sensor)
             m = r.model
             print(
-                f"{case.id:10} {label:8} cycles={len(r.peak_errors):3} "
+                f"{case.id:10} {label:18} cycles={len(r.peak_errors):3} "
                 f"peak error mean abs={r.mean_abs_peak_error:.2f} worst={r.worst_peak_error:+.2f} "
                 f"comfort mean={r.mean_comfort_error:+.2f}  "
                 f"beta={m.beta} n={m.beta_samples} h={m.holding_delta} flat={m.flat_overshoot:.2f}"

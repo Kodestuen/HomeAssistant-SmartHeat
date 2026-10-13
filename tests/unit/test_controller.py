@@ -261,6 +261,17 @@ def test_frost_guard_uses_return_when_room_sensor_is_lost():
     assert decision.reason == REASON_ROOM_SENSOR_LOST
 
 
+def test_lost_room_sensor_without_return_sensor_closes_after_timeout():
+    zone = Zone()
+    zone.step(20.0)
+    assert zone.step(None, minutes=10).reason == REASON_ROOM_SENSOR_WAIT
+    assert zone.step(None, minutes=30).reason == REASON_ROOM_SENSOR_LOST
+    # nothing can stand in for the room, so no frost pulses either
+    decision = zone.step(None, minutes=600)
+    assert not decision.valve_open
+    assert decision.reason == REASON_ROOM_SENSOR_LOST
+
+
 def test_frost_guard_heats_even_when_off():
     zone = Zone()
     decision = zone.step(6.5, heating_enabled=False)
@@ -312,6 +323,29 @@ def test_saturated_loop_is_flagged():
     assert zone.ctrl.supply_return_delta == pytest.approx(1.0)
     zone.step(20.0, ret=30.0, supply=35.0)
     assert not zone.ctrl.loop_saturated
+
+
+def test_supply_sensor_without_return_sensor():
+    zone = Zone()
+    zone.step(20.0, supply=50.0)
+    zone.step(20.0, supply=50.0, minutes=60)
+    assert zone.ctrl.supply_return_delta is None
+    assert not zone.ctrl.loop_saturated
+    assert not zone.ctrl.no_heat_source
+    zone.step(20.0, supply=21.0, minutes=10)
+    assert zone.ctrl.no_heat_source
+
+
+def test_zone_without_return_sensor_learns_only_the_average():
+    zone = Zone(initial_overshoot=0.8)
+    zone.open_then_close(ret=None)
+    zone.step(20.6, minutes=30)
+    zone.step(20.9, minutes=30)
+    zone.step(20.8, minutes=30)  # peaked
+    assert zone.model.cycles == 1
+    assert zone.model.flat_overshoot == pytest.approx(0.8 + 0.2 * (0.7 - 0.8))
+    assert zone.model.beta is None
+    assert zone.model.holding_delta is None
 
 
 def test_heat_up_rate_learned_from_heating_period():
