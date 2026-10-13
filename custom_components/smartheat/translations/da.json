@@ -1,0 +1,132 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tilføj en SmartHeat-zone",
+        "description": "SmartHeat åbner og lukker en on/off-ventil for én varmezone. Den lærer, hvor meget rummet bliver ved med at blive varmere, efter ventilen er lukket, og lukker så meget tidligere.",
+        "data": {
+          "name": "Navn",
+          "system_type": "Varmesystem",
+          "valve": "Ventil",
+          "room_sensor": "Rumtemperaturføler",
+          "return_sensor": "Returtemperaturføler",
+          "supply_sensor": "Fremløbstemperaturføler",
+          "window_sensor": "Vindues- eller dørføler"
+        },
+        "data_description": {
+          "name": "Zonens navn, fx rummet.",
+          "system_type": "Giver fornuftige standardværdier for ventiltider og sikkerhedsgrænser.",
+          "valve": "Kontakt, input boolean eller ventil, der lukker varmt vand ind i zonen.",
+          "room_sensor": "Måler temperaturen i det rum, zonen opvarmer.",
+          "return_sensor": "Måler vandet for enden af kredsen, på returrøret.",
+          "supply_sensor": "Valgfri. Måler vandet, der løber ind, så det kan ses, når der ikke er varmt vand.",
+          "window_sensor": "Valgfri. Ventilen holdes lukket, mens den er åben."
+        }
+      }
+    },
+    "error": {
+      "same_sensor": "Rumføler og returføler skal være to forskellige enheder."
+    },
+    "abort": {
+      "already_configured": "Denne ventil bruges allerede af en SmartHeat-zone."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Indstillinger for SmartHeat-zone",
+        "data": {
+          "valve": "Ventil",
+          "room_sensor": "Rumtemperaturføler",
+          "return_sensor": "Returtemperaturføler",
+          "supply_sensor": "Fremløbstemperaturføler",
+          "window_sensor": "Vindues- eller dørføler",
+          "invert_valve": "Omvendt ventil",
+          "min_temp": "Laveste temperatur",
+          "max_temp": "Højeste temperatur",
+          "eco_temp": "Eco-temperatur",
+          "away_temp": "Temperatur ved fravær",
+          "frost_temp": "Frostsikringstemperatur",
+          "hysteresis": "Hysterese",
+          "min_open_minutes": "Mindste åbningstid",
+          "min_closed_minutes": "Mindste lukketid",
+          "coast_window_minutes": "Efterløbsvindue",
+          "max_return_temp": "Højeste returtemperatur",
+          "sensor_timeout_minutes": "Timeout for rumføler"
+        },
+        "data_description": {
+          "invert_valve": "Slå til for en normalt åben aktuator, hvor tænd lukker ventilen.",
+          "frost_temp": "Ventilen åbner under denne temperatur, også når zonen er slukket.",
+          "hysteresis": "Ventilen åbner, når rummet er så meget under måltemperaturen.",
+          "min_open_minutes": "Termiske aktuatorer skal bruge et par minutter på at åbne helt.",
+          "coast_window_minutes": "Hvor længe der ventes på, at rummet topper efter en tidlig lukning.",
+          "max_return_temp": "Ventilen lukker over denne temperatur, fx for at beskytte gulvet.",
+          "sensor_timeout_minutes": "Ventilen lukker, når rumføleren har været utilgængelig så længe."
+        }
+      }
+    },
+    "error": {
+      "same_sensor": "Rumføler og returføler skal være to forskellige enheder.",
+      "min_above_max": "Laveste temperatur skal være under højeste temperatur."
+    },
+    "abort": {
+      "already_configured": "Denne ventil bruges allerede af en anden SmartHeat-zone."
+    }
+  },
+  "selector": {
+    "system_type": {
+      "options": {
+        "underfloor": "Gulvvarme",
+        "radiator": "Radiatorer"
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "zone": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Ingen",
+              "eco": "Eco",
+              "away": "Ude",
+              "frost": "Frostsikring"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "learned_overshoot": {
+        "name": "Lært oversving"
+      },
+      "heat_storage_factor": {
+        "name": "Varmelagringsfaktor"
+      },
+      "holding_difference": {
+        "name": "Holdedifference"
+      },
+      "learning_cycles": {
+        "name": "Læringscyklusser"
+      },
+      "last_peak_error": {
+        "name": "Seneste top i forhold til mål"
+      },
+      "heat_up_rate": {
+        "name": "Opvarmningshastighed"
+      },
+      "valve_duty": {
+        "name": "Ventil åben (24 t)"
+      },
+      "supply_return_difference": {
+        "name": "Forskel fremløb-retur"
+      }
+    }
+  },
+  "services": {
+    "reset_learning": {
+      "name": "Nulstil læring",
+      "description": "Glemmer, hvad SmartHeat har lært om denne zone, og starter forfra fra standardværdierne."
+    }
+  }
+}

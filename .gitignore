@@ -1,0 +1,10 @@
+# Home Assistant access tokens must never be committed
+*.token.txt
+*.token
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/

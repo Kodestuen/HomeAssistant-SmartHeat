@@ -1,0 +1,5 @@
+reset_learning:
+  target:
+    entity:
+      integration: smartheat
+      domain: climate

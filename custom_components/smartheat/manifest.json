@@ -1,0 +1,13 @@
+{
+  "domain": "smartheat",
+  "name": "SmartHeat",
+  "codeowners": ["@Kodestuen"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/Kodestuen/HomeAssistant-SmartHeat",
+  "integration_type": "device",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/Kodestuen/HomeAssistant-SmartHeat/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
