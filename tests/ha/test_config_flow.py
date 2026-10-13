@@ -89,7 +89,9 @@ async def test_valve_used_twice_aborts(hass: HomeAssistant) -> None:
     assert result["reason"] == "already_configured"
 
 
-async def test_options_flow_changes_settings_and_removes_sensor(hass: HomeAssistant) -> None:
+async def test_options_flow_changes_settings_and_removes_sensor(
+    hass: HomeAssistant,
+) -> None:
     entry = zone_entry(**{CONF_SUPPLY_SENSOR: "sensor.living_room_supply"})
     entry.add_to_hass(hass)
 

@@ -179,7 +179,12 @@ def simulate(
             else:
                 closed[1] = max(closed[1], plant.t_room)
         if decision.valve_open != valve:
-            if decision.valve_open and closed is not None and measuring and closed[0] == TARGET:
+            if (
+                decision.valve_open
+                and closed is not None
+                and measuring
+                and closed[0] == TARGET
+            ):
                 result.peak_errors.append(closed[1] - TARGET)
             closed = None if decision.valve_open else [target, plant.t_room]
             valve, changed_at = decision.valve_open, now
@@ -204,10 +209,12 @@ def test_learning_beats_plain_thermostat(plant, config, initial):
     assert learned.model.trained
     assert learned.mean_abs_peak_error < plain.mean_abs_peak_error / 2
     assert learned.worst_peak_error < plain.worst_peak_error / 2
-    assert learned.mean_comfort_error > -0.4  # closing early must not leave the room cold
+    # closing early must not leave the room cold
+    assert learned.mean_comfort_error > -0.4
 
 
-if __name__ == "__main__":  # python tests/unit/test_simulation.py prints the README table
+# python tests/unit/test_simulation.py prints the README table
+if __name__ == "__main__":
     for case in CASES:
         plant, config, initial = case.values
         for label, model in (

@@ -277,7 +277,9 @@ def test_learned_model_used_when_return_known_else_flat():
     zone.model.beta, zone.model.beta_samples, zone.model.holding_delta = 0.5, 3, 4.0
     zone.step(20.0)
     decision = zone.step(20.0, ret=28.0, minutes=20)
-    assert decision.predicted_overshoot == pytest.approx(0.5 * (4.0 - 4.0 * math.log(2)))
+    assert decision.predicted_overshoot == pytest.approx(
+        0.5 * (4.0 - 4.0 * math.log(2))
+    )
     assert zone.step(20.0, ret=None).predicted_overshoot == pytest.approx(0.4)
 
 

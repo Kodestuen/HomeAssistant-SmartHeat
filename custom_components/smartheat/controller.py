@@ -157,7 +157,11 @@ class Controller:
             return
         changed_at = now if inp.valve_changed_at is None else inp.valve_changed_at
         # The update that decided the change saw the room as it was when it happened.
-        ref = self._prev if self._prev is not None and self._prev.room is not None else inp
+        ref = (
+            self._prev
+            if self._prev is not None and self._prev.room is not None
+            else inp
+        )
         if self.valve_open is None:
             # first sight of the valve: nothing to learn from yet
             self.valve_open = inp.valve_open

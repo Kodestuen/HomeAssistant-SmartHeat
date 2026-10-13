@@ -47,7 +47,9 @@ TEMPERATURE_SENSOR = selector.EntitySelector(
 )
 
 
-def _number(minimum: float, maximum: float, step: float, unit: str) -> selector.NumberSelector:
+def _number(
+    minimum: float, maximum: float, step: float, unit: str
+) -> selector.NumberSelector:
     return selector.NumberSelector(
         selector.NumberSelectorConfig(
             min=minimum,
@@ -74,7 +76,9 @@ ENTITIES_SCHEMA = {
 USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): selector.TextSelector(),
-        vol.Required(CONF_SYSTEM_TYPE, default=SYSTEM_UNDERFLOOR): selector.SelectSelector(
+        vol.Required(
+            CONF_SYSTEM_TYPE, default=SYSTEM_UNDERFLOOR
+        ): selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=SYSTEM_TYPES,
                 translation_key=CONF_SYSTEM_TYPE,
