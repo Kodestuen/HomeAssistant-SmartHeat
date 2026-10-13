@@ -87,11 +87,130 @@
         "state_attributes": {
           "preset_mode": {
             "state": {
-              "none": "None",
+              "none": "Comfort",
               "eco": "Eco",
               "away": "Away",
               "frost": "Frost protection"
             }
+          },
+          "comfort_temperature": {
+            "name": "Comfort temperature"
+          },
+          "reason": {
+            "name": "Reason",
+            "state": {
+              "heating": "Heating",
+              "idle": "Warm enough",
+              "predictive_close": "Closing early",
+              "coasting": "Coasting",
+              "min_open_time": "Minimum open time",
+              "min_closed_time": "Minimum closed time",
+              "off": "Off",
+              "window_open": "Window open",
+              "max_return_temp": "Water too hot",
+              "room_sensor_unavailable": "Waiting for room sensor",
+              "room_sensor_lost": "Room sensor lost",
+              "frost_protection": "Frost protection"
+            }
+          },
+          "predicted_overshoot": {
+            "name": "Predicted overshoot"
+          },
+          "close_threshold": {
+            "name": "Valve closes at"
+          },
+          "trained": {
+            "name": "Prediction",
+            "state": {
+              "true": "Learned model",
+              "false": "Average of past cycles"
+            }
+          },
+          "coasting": {
+            "name": "Coasting",
+            "state": {
+              "true": "Yes",
+              "false": "No"
+            }
+          },
+          "return_temperature": {
+            "name": "Return temperature"
+          },
+          "supply_temperature": {
+            "name": "Supply temperature"
+          },
+          "supply_return_delta": {
+            "name": "Supply-return difference"
+          },
+          "no_heat_source": {
+            "name": "No hot water",
+            "state": {
+              "true": "Yes",
+              "false": "No"
+            }
+          },
+          "loop_saturated": {
+            "name": "Loop saturated",
+            "state": {
+              "true": "Yes",
+              "false": "No"
+            }
+          },
+          "system_type": {
+            "name": "Heating system",
+            "state": {
+              "underfloor": "Underfloor heating",
+              "radiator": "Radiators"
+            }
+          },
+          "valve_entity_id": {
+            "name": "Valve"
+          },
+          "room_sensor_entity_id": {
+            "name": "Room temperature sensor"
+          },
+          "return_sensor_entity_id": {
+            "name": "Return temperature sensor"
+          },
+          "supply_sensor_entity_id": {
+            "name": "Supply temperature sensor"
+          },
+          "window_sensor_entity_id": {
+            "name": "Window or door sensor"
+          },
+          "invert_valve": {
+            "name": "Inverted valve",
+            "state": {
+              "true": "Yes",
+              "false": "No"
+            }
+          },
+          "hysteresis": {
+            "name": "Hysteresis"
+          },
+          "min_open_minutes": {
+            "name": "Minimum open time"
+          },
+          "min_closed_minutes": {
+            "name": "Minimum closed time"
+          },
+          "coast_window_minutes": {
+            "name": "Coast window"
+          },
+          "max_return_temp": {
+            "name": "Maximum return temperature"
+          },
+          "sensor_timeout_minutes": {
+            "name": "Room sensor timeout"
+          },
+          "eco_temp": {
+            "name": "Eco temperature"
+          },
+          "away_temp": {
+            "name": "Away temperature"
+          },
+          "frost_temp": {
+            "name": "Frost protection temperature"
           }
         }
       }

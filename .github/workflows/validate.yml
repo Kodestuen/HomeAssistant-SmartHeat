@@ -31,3 +31,13 @@ jobs:
           cache-dependency-path: requirements_test.txt
       - run: pip install -r requirements_test.txt
       - run: pytest -v
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # A glob, not "dashboard/": since Node 21 the test runner takes files or globs
+      - run: node --test "dashboard/*.test.mjs"

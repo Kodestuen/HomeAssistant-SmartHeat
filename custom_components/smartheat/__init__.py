@@ -7,7 +7,8 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.storage import Store
 
 from .const import (
@@ -17,6 +18,7 @@ from .const import (
     CONF_MAX_RETURN,
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
+    CONF_ROOM_SENSOR,
     CONF_SENSOR_TIMEOUT,
     CONF_SYSTEM_TYPE,
     DOMAIN,
@@ -74,7 +76,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) ->
         model,
     )
     entry.runtime_data = SmartHeatData(controller, store)
+    # The zone's device is registered with its entities, so none yet means a new zone
+    device_registry = dr.async_get(hass)
+    new_zone = not dr.async_entries_for_config_entry(device_registry, entry.entry_id)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if new_zone:
+        _async_adopt_room_area(hass, entry, config[CONF_ROOM_SENSOR])
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
@@ -90,6 +97,31 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) -
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Delete the learned data when a zone is removed."""
     await _store(hass, entry).async_remove()
+
+
+@callback
+def _async_adopt_room_area(
+    hass: HomeAssistant, entry: ConfigEntry, room_sensor: str
+) -> None:
+    """Put a new zone's device in the room sensor's area.
+
+    This runs once the platforms are set up, so the entities created with the zone
+    keep IDs without the area. Entities added later get the area in their IDs, as on
+    any device in an area. It runs only for a new zone and never replaces an area, so
+    whatever the user chooses later stays.
+    """
+    if (room := er.async_get(hass).async_get(room_sensor)) is None:
+        return
+    device_registry = dr.async_get(hass)
+    area_id = room.area_id
+    if area_id is None and room.device_id is not None:
+        room_device = device_registry.async_get(room.device_id)
+        area_id = room_device.area_id if room_device else None
+    if area_id is None:
+        return
+    for device in dr.async_entries_for_config_entry(device_registry, entry.entry_id):
+        if device.area_id is None:
+            device_registry.async_update_device(device.id, area_id=area_id)
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:

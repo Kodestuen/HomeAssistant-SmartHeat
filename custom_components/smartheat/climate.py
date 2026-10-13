@@ -51,15 +51,28 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from . import SmartHeatConfigEntry, zone_config
 from .const import (
+    ATTR_RETURN_SENSOR_ENTITY_ID,
+    ATTR_ROOM_SENSOR_ENTITY_ID,
+    ATTR_SUPPLY_SENSOR_ENTITY_ID,
+    ATTR_SYSTEM_TYPE,
+    ATTR_VALVE_ENTITY_ID,
+    ATTR_WINDOW_SENSOR_ENTITY_ID,
     CONF_AWAY_TEMP,
+    CONF_COAST_WINDOW,
     CONF_ECO_TEMP,
     CONF_FROST_TEMP,
+    CONF_HYSTERESIS,
     CONF_INVERT_VALVE,
+    CONF_MAX_RETURN,
     CONF_MAX_TEMP,
+    CONF_MIN_CLOSED,
+    CONF_MIN_OPEN,
     CONF_MIN_TEMP,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
+    CONF_SENSOR_TIMEOUT,
     CONF_SUPPLY_SENSOR,
+    CONF_SYSTEM_TYPE,
     CONF_VALVE,
     CONF_WINDOW_SENSOR,
     DEFAULT_TARGET,
@@ -77,6 +90,18 @@ COMMAND_RETRY_S = 60.0  # resend a command the valve hasn't followed after this 
 SAVE_DELAY_S = 10.0
 ATTR_COMFORT_TEMPERATURE = "comfort_temperature"
 VALVE_STATES = {"open": True, "opening": True, "closed": False, "closing": False}
+# Tuning options that are also attributes, under their option keys
+TUNING_ATTRIBUTES = (
+    CONF_HYSTERESIS,
+    CONF_MIN_OPEN,
+    CONF_MIN_CLOSED,
+    CONF_COAST_WINDOW,
+    CONF_MAX_RETURN,
+    CONF_SENSOR_TIMEOUT,
+    CONF_ECO_TEMP,
+    CONF_AWAY_TEMP,
+    CONF_FROST_TEMP,
+)
 
 
 async def async_setup_entry(
@@ -111,6 +136,19 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
     )
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = 0.5
+    # The zone's configuration only changes with a reload, so the recorder skips it
+    _unrecorded_attributes = frozenset(
+        {
+            ATTR_SYSTEM_TYPE,
+            ATTR_VALVE_ENTITY_ID,
+            ATTR_ROOM_SENSOR_ENTITY_ID,
+            ATTR_RETURN_SENSOR_ENTITY_ID,
+            ATTR_SUPPLY_SENSOR_ENTITY_ID,
+            ATTR_WINDOW_SENSOR_ENTITY_ID,
+            CONF_INVERT_VALVE,
+            *TUNING_ATTRIBUTES,
+        }
+    )
 
     def __init__(self, entry: SmartHeatConfigEntry) -> None:
         super().__init__(entry, "climate")
@@ -129,6 +167,17 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         }
         self._attr_min_temp = config[CONF_MIN_TEMP]
         self._attr_max_temp = config[CONF_MAX_TEMP]
+        # Built once: changing the options reloads the zone
+        self._config_attributes: dict[str, Any] = {
+            ATTR_SYSTEM_TYPE: config[CONF_SYSTEM_TYPE],
+            ATTR_VALVE_ENTITY_ID: self._valve,
+            ATTR_ROOM_SENSOR_ENTITY_ID: self._room_sensor,
+            ATTR_RETURN_SENSOR_ENTITY_ID: self._return_sensor,
+            ATTR_SUPPLY_SENSOR_ENTITY_ID: self._supply_sensor or None,
+            ATTR_WINDOW_SENSOR_ENTITY_ID: self._window_sensor or None,
+            CONF_INVERT_VALVE: self._invert,
+            **{key: config[key] for key in TUNING_ATTRIBUTES},
+        }
         self._attr_hvac_mode = HVACMode.HEAT
         self._attr_preset_mode = PRESET_NONE
         self._comfort_temperature = DEFAULT_TARGET
@@ -163,14 +212,17 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Explain what the controller is doing."""
+        """Explain what the controller is doing, and show how the zone is set up."""
         controller = self._controller
         decision = controller.last_decision
         attributes: dict[str, Any] = {
             ATTR_COMFORT_TEMPERATURE: self._comfort_temperature,
             "reason": decision.reason if decision else None,
-            "predicted_overshoot": _round(decision.predicted_overshoot if decision else None),
+            "predicted_overshoot": _round(
+                decision.predicted_overshoot if decision else None
+            ),
             "close_threshold": _round(decision.close_threshold if decision else None),
+            "trained": controller.model.trained,
             "coasting": controller.coasting,
             "return_temperature": self._return,
         }
@@ -179,6 +231,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             attributes["supply_return_delta"] = _round(controller.supply_return_delta)
             attributes["no_heat_source"] = controller.no_heat_source
             attributes["loop_saturated"] = controller.loop_saturated
+        attributes.update(self._config_attributes)
         return attributes
 
     async def async_added_to_hass(self) -> None:
@@ -199,7 +252,9 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             if entity_id
         ]
         self.async_on_remove(
-            async_track_state_change_event(self.hass, watched, self._async_state_changed)
+            async_track_state_change_event(
+                self.hass, watched, self._async_state_changed
+            )
         )
         self.async_on_remove(
             async_track_time_interval(self.hass, self._async_tick, UPDATE_INTERVAL)
@@ -217,7 +272,9 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         comfort = last_state.attributes.get(ATTR_COMFORT_TEMPERATURE)
         if isinstance(comfort, (int, float)):
             self._comfort_temperature = float(comfort)
-        if (preset := last_state.attributes.get(ATTR_PRESET_MODE)) in self._attr_preset_modes:
+        if (
+            preset := last_state.attributes.get(ATTR_PRESET_MODE)
+        ) in self._attr_preset_modes:
             self._attr_preset_mode = preset
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -261,7 +318,10 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             now = dt_util.utcnow().timestamp()
             inputs = self._read_inputs()
             decision = self._controller.update(inputs, now)
-            if inputs.valve_open is not None and decision.valve_open != inputs.valve_open:
+            if (
+                inputs.valve_open is not None
+                and decision.valve_open != inputs.valve_open
+            ):
                 await self._async_command_valve(decision.valve_open, now)
             self._save_learning()
         if self._removed:
@@ -330,7 +390,9 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
                 domain, service, {ATTR_ENTITY_ID: self._valve}, blocking=True
             )
         except HomeAssistantError as err:
-            _LOGGER.warning("%s could not %s %s: %s", self.entity_id, service, self._valve, err)
+            _LOGGER.warning(
+                "%s could not %s %s: %s", self.entity_id, service, self._valve, err
+            )
 
     def _save_learning(self) -> None:
         model = self._controller.model

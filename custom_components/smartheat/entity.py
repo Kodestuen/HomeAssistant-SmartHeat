@@ -6,9 +6,12 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from . import SmartHeatConfigEntry
-from .const import CONF_SYSTEM_TYPE, DOMAIN, SYSTEM_UNDERFLOOR
+from .const import CONF_SYSTEM_TYPE, DOMAIN, SYSTEM_RADIATOR, SYSTEM_UNDERFLOOR
 
-MODELS = {SYSTEM_UNDERFLOOR: "Underfloor heating zone"}
+MODELS = {
+    SYSTEM_UNDERFLOOR: "Underfloor heating zone",
+    SYSTEM_RADIATOR: "Radiator zone",
+}
 
 
 class SmartHeatEntity(Entity):
@@ -21,9 +24,11 @@ class SmartHeatEntity(Entity):
         self._entry = entry
         self._controller = entry.runtime_data.controller
         self._attr_unique_id = f"{entry.entry_id}_{key}"
+        system_type = entry.data[CONF_SYSTEM_TYPE]
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
             manufacturer="SmartHeat",
-            model=MODELS.get(entry.data[CONF_SYSTEM_TYPE], "Radiator zone"),
+            model=MODELS[system_type],
+            model_id=system_type,
         )

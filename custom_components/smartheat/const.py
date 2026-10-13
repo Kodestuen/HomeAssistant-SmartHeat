@@ -29,6 +29,14 @@ CONF_FROST_TEMP = "frost_temp"
 CONF_ECO_TEMP = "eco_temp"
 CONF_AWAY_TEMP = "away_temp"
 
+# Climate attributes that describe the zone's configuration
+ATTR_SYSTEM_TYPE = "system_type"
+ATTR_VALVE_ENTITY_ID = "valve_entity_id"
+ATTR_ROOM_SENSOR_ENTITY_ID = "room_sensor_entity_id"
+ATTR_RETURN_SENSOR_ENTITY_ID = "return_sensor_entity_id"
+ATTR_SUPPLY_SENSOR_ENTITY_ID = "supply_sensor_entity_id"
+ATTR_WINDOW_SENSOR_ENTITY_ID = "window_sensor_entity_id"
+
 SYSTEM_UNDERFLOOR = "underfloor"
 SYSTEM_RADIATOR = "radiator"
 SYSTEM_TYPES = [SYSTEM_UNDERFLOOR, SYSTEM_RADIATOR]

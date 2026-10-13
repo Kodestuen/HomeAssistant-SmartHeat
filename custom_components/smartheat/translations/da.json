@@ -87,11 +87,130 @@
         "state_attributes": {
           "preset_mode": {
             "state": {
-              "none": "Ingen",
+              "none": "Komfort",
               "eco": "Eco",
               "away": "Ude",
               "frost": "Frostsikring"
             }
+          },
+          "comfort_temperature": {
+            "name": "Komforttemperatur"
+          },
+          "reason": {
+            "name": "Årsag",
+            "state": {
+              "heating": "Varmer",
+              "idle": "Varm nok",
+              "predictive_close": "Lukker tidligt",
+              "coasting": "Efterløb",
+              "min_open_time": "Mindste åbningstid",
+              "min_closed_time": "Mindste lukketid",
+              "off": "Slukket",
+              "window_open": "Vindue åbent",
+              "max_return_temp": "Vandet er for varmt",
+              "room_sensor_unavailable": "Venter på rumføler",
+              "room_sensor_lost": "Rumføler mistet",
+              "frost_protection": "Frostsikring"
+            }
+          },
+          "predicted_overshoot": {
+            "name": "Forventet oversving"
+          },
+          "close_threshold": {
+            "name": "Ventilen lukker ved"
+          },
+          "trained": {
+            "name": "Forudsigelse",
+            "state": {
+              "true": "Lært model",
+              "false": "Gennemsnit af tidligere cyklusser"
+            }
+          },
+          "coasting": {
+            "name": "Efterløb",
+            "state": {
+              "true": "Ja",
+              "false": "Nej"
+            }
+          },
+          "return_temperature": {
+            "name": "Returtemperatur"
+          },
+          "supply_temperature": {
+            "name": "Fremløbstemperatur"
+          },
+          "supply_return_delta": {
+            "name": "Forskel fremløb-retur"
+          },
+          "no_heat_source": {
+            "name": "Intet varmt vand",
+            "state": {
+              "true": "Ja",
+              "false": "Nej"
+            }
+          },
+          "loop_saturated": {
+            "name": "Kredsen er mættet",
+            "state": {
+              "true": "Ja",
+              "false": "Nej"
+            }
+          },
+          "system_type": {
+            "name": "Varmesystem",
+            "state": {
+              "underfloor": "Gulvvarme",
+              "radiator": "Radiatorer"
+            }
+          },
+          "valve_entity_id": {
+            "name": "Ventil"
+          },
+          "room_sensor_entity_id": {
+            "name": "Rumtemperaturføler"
+          },
+          "return_sensor_entity_id": {
+            "name": "Returtemperaturføler"
+          },
+          "supply_sensor_entity_id": {
+            "name": "Fremløbstemperaturføler"
+          },
+          "window_sensor_entity_id": {
+            "name": "Vindues- eller dørføler"
+          },
+          "invert_valve": {
+            "name": "Omvendt ventil",
+            "state": {
+              "true": "Ja",
+              "false": "Nej"
+            }
+          },
+          "hysteresis": {
+            "name": "Hysterese"
+          },
+          "min_open_minutes": {
+            "name": "Mindste åbningstid"
+          },
+          "min_closed_minutes": {
+            "name": "Mindste lukketid"
+          },
+          "coast_window_minutes": {
+            "name": "Efterløbsvindue"
+          },
+          "max_return_temp": {
+            "name": "Højeste returtemperatur"
+          },
+          "sensor_timeout_minutes": {
+            "name": "Timeout for rumføler"
+          },
+          "eco_temp": {
+            "name": "Eco-temperatur"
+          },
+          "away_temp": {
+            "name": "Temperatur ved fravær"
+          },
+          "frost_temp": {
+            "name": "Frostsikringstemperatur"
           }
         }
       }

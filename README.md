@@ -89,16 +89,22 @@ The system type sets the defaults. Every setting can be changed later under the 
 
 ## Entities
 
-Each zone is a device with one climate entity:
+Each zone is a device with one climate entity. When you add a zone, its device is placed in the room sensor's area (the sensor's own area, or else that of its device). This happens only once, so you can move the zone to another area afterwards.
 
 - **Modes:** heat and off.
-- **Presets:** none, eco, away, frost protection.
+- **Presets:** comfort (`none`), eco, away, frost protection. The `comfort_temperature` attribute holds the comfort target, also while another preset is active.
 - **Attributes:** these explain what the controller is doing.
   - `reason`: why the valve is open or closed right now
   - `predicted_overshoot` and `close_threshold`
+  - `trained`: true once β and h are learned; the prediction then uses them whenever the return temperature is known, and the plain average otherwise
   - `coasting`
   - `return_temperature`
   - with a supply sensor, also: `supply_temperature`, `supply_return_delta`, `no_heat_source` and `loop_saturated`
+- **Configuration attributes:** how the zone is set up, for dashboards and templates. They only change with the settings, so the recorder leaves them out.
+  - `system_type`: `underfloor` or `radiator`
+  - `valve_entity_id`, `room_sensor_entity_id`, `return_sensor_entity_id`, `supply_sensor_entity_id` and `window_sensor_entity_id` (null when the zone has no such sensor)
+  - `invert_valve`
+  - the tuning, under the option names: `hysteresis`, `min_open_minutes`, `min_closed_minutes`, `coast_window_minutes`, `max_return_temp`, `sensor_timeout_minutes`, `eco_temp`, `away_temp` and `frost_temp`
 
 Each zone also has diagnostic sensors. Graph them to watch the learning:
 
@@ -114,6 +120,21 @@ Each zone also has diagnostic sensors. Graph them to watch the learning:
 | Supply-return difference | Only with a supply sensor |
 
 The service `smartheat.reset_learning` makes a zone forget what it has learned.
+
+## Heating dashboard
+
+`dashboard/heating_dashboard.mjs` builds a **Heating** dashboard for your zones and saves it in Home Assistant. It finds the zones with their sensors and areas, and makes an overview with a tile per zone, a page per zone with its charts and settings, and, with two or more zones, a page that compares them. It needs Node.js 22 or newer and a long-lived access token of an admin user:
+
+```
+node dashboard/heating_dashboard.mjs --url http://homeassistant.local:8123 --token-file ha.token.txt
+```
+
+- Add `--dry-run` to see the dashboard without saving anything.
+- `HA_URL` and `HA_TOKEN` can replace `--url` and `--token-file`. The token is never printed or saved, and files ending in `.token.txt` are ignored by git.
+- If the dashboard was edited in Home Assistant since the last run, the script stops instead of overwriting the edits. `--force` overwrites them.
+- Run it again after adding, removing or renaming a zone, or after upgrading SmartHeat.
+
+All options are described in [dashboard/README.md](dashboard/README.md).
 
 ## Trying it without hardware
 

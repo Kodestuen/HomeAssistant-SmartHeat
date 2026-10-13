@@ -2,6 +2,11 @@
 *.token.txt
 *.token
 
+# Heating dashboard generator: the last saved config and fetched snapshots hold
+# Home Assistant data (user IDs, names, locations), wherever they are written
+*.last.json
+*.snapshot.json
+
 .venv/
 __pycache__/
 *.pyc

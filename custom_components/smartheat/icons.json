@@ -1,0 +1,23 @@
+{
+  "entity": {
+    "climate": {
+      "zone": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "away": "mdi:account-arrow-right",
+              "eco": "mdi:leaf",
+              "frost": "mdi:snowflake-thermometer",
+              "none": "mdi:sofa"
+            }
+          }
+        }
+      }
+    }
+  },
+  "services": {
+    "reset_learning": {
+      "service": "mdi:restore"
+    }
+  }
+}
