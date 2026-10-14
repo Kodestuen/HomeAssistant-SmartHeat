@@ -23,6 +23,19 @@ Since SmartHeat 0.3.1, an underfloor zone keeps heating when its room sensor is 
 
 The controller table of an underfloor zone has a Room sensor row: Has a reading, No reading, or Silent when the sensor has not sent a new reading for the "Room sensor silent after (0 = off)" time shown under Current tuning. Helpers such as template sensors, which report only when one of their sources changes, and entities without a unique ID are never counted as silent.
 
+Since SmartHeat 0.4.0, a thermostat zone shows its **aim offset** under Current tuning: the thermostat aims that much above the target, or below it if the offset is negative. The sentence at the top of the zone page mentions an offset that is not 0, and the "Warm enough" sentence includes it in the temperature where the valve opens again.
+
+An underfloor zone can also run on the experimental **tickle pulses** (Configure → Control method). Its page then follows the pulses:
+
+- The sentence at the top says what the pulse is doing: filling the loop, heating until the return water reaches the return target, or waiting for the next pulse, with its time.
+- The controller table shows the control method, the return target, the return offset, the outdoor temperature in use, the next pulse, whether SmartHeat is calibrating the offset, and any fallback. The thermostat's prediction rows are left out.
+- The water temperatures chart adds the return target, so you can see each pulse end there. "Return offset, last 14 days" replaces the overshoot chart. What SmartHeat has learned starts with the return offset and return target; the thermostat's values stay as they were.
+- Sensors and valve shows the zone's outdoor temperature: a sensor's state, or a weather entity's temperature.
+- Current tuning shows the pulse interval and the minimum pulse. The hysteresis and minimum open time stay, because frost protection still uses them. The other thermostat settings and the aim offset are left out.
+- Reset learning only resets the return offset. It starts again from what the thermostat learned.
+
+A tickle zone keeps heating when it loses a sensor. The overview then warns "room sensor lost, pulsing on the return temperature", "return sensor lost, timed pulses" or "room and return sensors lost, heating by the last day's average". The zone page says how much of each interval the valve opens; without the room sensor that is the most it opens, as the return target may end a pulse sooner. Without the room sensor the share is that of the last day, so if the valve was hardly open over the last day, it stays closed until the sensor is back, and the overview warns "room sensor lost, valve closed" or "room and return sensors lost, valve closed" instead.
+
 ## Requirements
 
 - Node.js 22 or newer. No npm packages are needed.
@@ -67,7 +80,7 @@ The guard also stops a run when the state file is missing but the dashboard alre
 ## When to run it again
 
 - A zone is added, removed or renamed. The notice on the page reminds you.
-- A zone's options change.
+- A zone's options change. After switching the control method, the notice on the page reminds you too.
 - SmartHeat is upgraded.
 - The Outdoor temperature helper is created.
 - A diagnostic sensor is enabled or disabled.

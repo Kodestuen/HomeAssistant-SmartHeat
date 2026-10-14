@@ -96,6 +96,11 @@ const DIAGNOSTICS = [
   ["valve_duty", "valve_open_24_h", "35", "%", "measurement"],
   ["supply_return_difference", "supply_return_difference", "5.0", "°C", "measurement"],
 ];
+// SmartHeat 0.4.0 adds these to tickle zones only
+const TICKLE_DIAGNOSTICS = [
+  ["return_offset", "return_offset", "4.35", "°C", "measurement"],
+  ["return_target", "return_target", "29.1", "°C", "measurement"],
+];
 
 let zoneCounter = 0;
 
@@ -105,10 +110,14 @@ let zoneCounter = 0;
 // return sensor (SmartHeat 0.3.0): it has no sensors that need the return temperature, and its
 // prediction is never trained. version 3 is SmartHeat 0.3.1: every zone has the fallback
 // attributes, and an underfloor zone also checks whether its room sensor has gone silent for
-// silentHours (0 turns the check off).
+// silentHours (0 turns the check off). version 4 is SmartHeat 0.4.0: every zone has a control
+// method (strategy) and an aim offset, and an underfloor zone has the pulse settings and may
+// have an outdoor entity (outside: "sensor" or "weather"). A tickle zone reports its pulses
+// instead of the overshoot prediction and has the return offset and return target sensors.
 function addZone(snap, {
   id, name, system = "underfloor", version = 2, area = null, deviceArea = true, supply = false, ret = true,
   window = null, invert = false, valveDomain = "switch", state = "heat", restored = false, silentHours = 6,
+  strategy = "thermostat", outside = null, aimOffset = 0,
   entryId = `01ZONE${String(++zoneCounter).padStart(20, "0")}`,
 }) {
   const deviceId = `device-${entryId.toLowerCase()}`;
@@ -119,19 +128,22 @@ function addZone(snap, {
     model_id: version >= 2 ? system : null, area_id: version >= 2 && deviceArea ? area : null,
   });
 
-  // The valve and sensors come from other integrations; the return sensor has no registry row
+  // The valve and sensors come from other integrations; the return sensor has no registry row.
+  // The weather entity of an outdoor "weather" comes from newSnapshot.
   const inputs = {
     valve: `${valveDomain}.${id}_valve`,
     room: `sensor.${id}_temperature`,
     ret: ret ? `sensor.${id}_return_temperature` : null,
     supply: supply ? `sensor.${id}_supply_temperature` : null,
     window: window ? `binary_sensor.${id}_${window}` : null,
+    outside: { sensor: `sensor.${id}_garden_temperature`, weather: "weather.forecast_test" }[outside] ?? null,
   };
   addEntity(snap, inputs.valve, valveDomain === "valve" ? "open" : "on", { friendly_name: `${name} valve` }, { platform: "demo", unique_id: `${id}-valve` });
   addEntity(snap, inputs.room, "21.2", { ...TEMPERATURE, friendly_name: `${name} temperature` }, { platform: "demo", unique_id: `${id}-room`, area_id: area });
   if (ret) addEntity(snap, inputs.ret, "30.1", { ...TEMPERATURE, friendly_name: `${name} return` });
   if (supply) addEntity(snap, inputs.supply, "35.0", { ...TEMPERATURE, friendly_name: `${name} supply` }, { platform: "demo", unique_id: `${id}-supply` });
   if (window) addEntity(snap, inputs.window, "off", { device_class: window, friendly_name: `${name} ${window}` }, { platform: "demo", unique_id: `${id}-${window}` });
+  if (outside === "sensor") addEntity(snap, inputs.outside, "3.5", { ...TEMPERATURE, friendly_name: `${name} garden temperature` }, { platform: "demo", unique_id: `${id}-garden` });
 
   let attributes = {
     hvac_modes: ["heat", "off"], min_temp: 5.0, max_temp: 28.0, target_temp_step: 0.5,
@@ -157,12 +169,23 @@ function addZone(snap, {
     Object.assign(attributes, { fallback: null, fallback_duty: null });
     if (system === "underfloor") Object.assign(attributes, { room_silent: false, room_sensor_silent_hours: silentHours });
   }
+  const tickle = version >= 4 && strategy === "tickle";
+  if (version >= 4) {
+    Object.assign(attributes, { strategy, aim_offset: aimOffset });
+    if (system === "underfloor") Object.assign(attributes, { outside_sensor_entity_id: inputs.outside, pulse_interval_minutes: 45, pulse_flush_minutes: 12 });
+  }
+  if (tickle) {
+    Object.assign(attributes, {
+      reason: "pulse", predicted_overshoot: null, close_threshold: null, return_threshold: 29.1,
+      next_pulse: "2026-01-15T08:45:00+00:00", outside_temperature: outside ? 3.5 : null, calibrating: true,
+    });
+  }
   // A zone that failed to load keeps its restored state
   if (restored) attributes = { friendly_name: name, supported_features: 401, restored: true };
   const zoneState = restored ? "unavailable" : state;
   const zoneRow = { platform: "smartheat", config_entry_id: entryId, device_id: deviceId };
   addEntity(snap, `climate.${id}`, zoneState, attributes, { ...zoneRow, unique_id: `${entryId}_climate` });
-  for (const [role, suffix, value, unit, stateClass] of DIAGNOSTICS) {
+  for (const [role, suffix, value, unit, stateClass] of [...(tickle ? TICKLE_DIAGNOSTICS : []), ...DIAGNOSTICS]) {
     if (role === "supply_return_difference" && !supply) continue;
     if (!ret && ["heat_storage_factor", "holding_difference", "supply_return_difference"].includes(role)) continue;
     const attrs = { state_class: stateClass, friendly_name: `${name} ${suffix}` };
@@ -188,6 +211,32 @@ function twoZoneSnapshot() {
   addZone(snap, { id: "stue", name: "Stue", area: "stue", supply: true, window: "door", invert: true });
   return snap;
 }
+
+// The same three zones as SmartHeat 0.3.1 (version 3) or 0.4.0 (version 4) on the thermostat
+function thermostatSnapshot(version) {
+  const snap = newSnapshot({ areas: ["stue", "badevaerelse", "kontor"] });
+  addOutdoorHelper(snap);
+  addZone(snap, {
+    id: "stue", name: "Stue", area: "stue", supply: true, window: "door", version, aimOffset: 0.15,
+    outside: version >= 4 ? "sensor" : null, entryId: "01PAIR00000000000000000001",
+  });
+  addZone(snap, { id: "badevaerelse", name: "Badeværelse", system: "radiator", area: "badevaerelse", valveDomain: "valve", version, aimOffset: -0.1, entryId: "01PAIR00000000000000000002" });
+  addZone(snap, { id: "kontor", name: "Kontor", system: "radiator", area: "kontor", ret: false, supply: true, version, entryId: "01PAIR00000000000000000003" });
+  return snap;
+}
+
+// Three tickle zones and a thermostat zone, all SmartHeat 0.4.0. The tickle zones get the
+// outdoor temperature from a sensor (with a supply sensor), a weather entity, or not at all.
+function tickleSnapshot() {
+  const snap = newSnapshot({ areas: ["stue", "kokken", "kontor", "badevaerelse"] });
+  addOutdoorHelper(snap);
+  addZone(snap, { id: "stue", name: "Stue", area: "stue", supply: true, version: 4, strategy: "tickle", outside: "sensor" });
+  addZone(snap, { id: "kokken", name: "Køkken", area: "kokken", window: "window", version: 4, strategy: "tickle", outside: "weather" });
+  addZone(snap, { id: "kontor", name: "Kontor", area: "kontor", version: 4, strategy: "tickle" });
+  addZone(snap, { id: "badevaerelse", name: "Badeværelse", system: "radiator", area: "badevaerelse", version: 4, aimOffset: 0.1 });
+  return snap;
+}
+const TICKLE_VIEWS = ["zone-stue", "zone-kokken", "zone-kontor", "zone-badevaerelse"];
 
 // Build and check: every generated config must pass checkConfig
 function build(snap) {
@@ -528,6 +577,377 @@ describe("buildDashboard", () => {
     assert.equal(JSON.stringify(build(shuffled).config), JSON.stringify(config));
   });
 
+  test("zones like SmartHeat 0.1.0 to 0.3.1 build exactly as before SmartHeat 0.4.0", () => {
+    const snap = newSnapshot({ areas: ["stue", "badevaerelse", "kontor", "kokken"] });
+    addOutdoorHelper(snap);
+    addZone(snap, { id: "stue", name: "Stue", area: "stue", supply: true, window: "door", invert: true, version: 3, entryId: "01GOLD00000000000000000001" });
+    addZone(snap, { id: "badevaerelse", name: "Badeværelse", system: "radiator", area: "badevaerelse", valveDomain: "valve", version: 3, entryId: "01GOLD00000000000000000002" });
+    addZone(snap, { id: "kontor", name: "Kontor", area: "kontor", silentHours: 0, version: 3, entryId: "01GOLD00000000000000000003" });
+    addZone(snap, { id: "kokken", name: "Køkken", system: "radiator", area: "kokken", ret: false, supply: true, entryId: "01GOLD00000000000000000004" });
+    addZone(snap, { id: "loft", name: "Loft", system: "radiator", version: 1, entryId: "01GOLD00000000000000000005" });
+    const { config } = build(snap);
+    // None of the SmartHeat 0.4.0 parts: such a zone has no control method or aim offset
+    const text = JSON.stringify(config);
+    for (const part of ["'strategy'", "aim_offset", "aiming", "return_sensor_unavailable", "'return_sensor'", "pulse", "Return offset", "Return target", "frost protection)"]) {
+      assert.ok(!text.includes(part), part);
+    }
+    // The config that the SmartHeat 0.3.1 generator (git show d768098:dashboard/heating_dashboard.mjs)
+    // builds from this snapshot. If the snapshot changes, take the new hash from that generator.
+    assert.equal(crypto.createHash("sha256").update(text).digest("hex"), "53ae43f57c35a0c189559cc3c1b8a84c743e8f257c26baec34fe18b06c0de0c9");
+  });
+
+  test("zones like SmartHeat 0.4.0 on the thermostat: the aim offset, and no tickle parts on their pages", () => {
+    const { config, warnings, zones } = build(thermostatSnapshot(4));
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(zones.map((z) => [z.path, z.inputs, z.tuning]), [["zone-stue", 5, 11], ["zone-badevaerelse", 3, 10], ["zone-kontor", 3, 9]]);
+    const [stue, bath, office] = ["zone-stue", "zone-badevaerelse", "zone-kontor"].map((p) => viewByPath(config, p));
+
+    // The aim offset comes first under Current tuning. The underfloor zone also reports the pulse
+    // settings and an outdoor sensor, which only the tickle uses.
+    const tuning = (view) => findSection(view, "Settings").cards[1].entities.slice(3).map((r) => r.attribute ?? r.label);
+    const shared = ["hysteresis", "min_open_minutes", "min_closed_minutes", "coast_window_minutes"];
+    const after = ["eco_temp", "away_temp", "frost_temp"];
+    assert.deepEqual(tuning(stue), ["Current tuning", "aim_offset", ...shared, "max_return_temp", "sensor_timeout_minutes", "room_sensor_silent_hours", ...after]);
+    assert.deepEqual(tuning(bath), ["Current tuning", "aim_offset", ...shared, "max_return_temp", "sensor_timeout_minutes", ...after]);
+    assert.deepEqual(tuning(office), ["Current tuning", "aim_offset", ...shared, "sensor_timeout_minutes", ...after]);
+    assert.deepEqual(findSection(stue, "Settings").cards[1].entities[4], {
+      type: "attribute", entity: "climate.stue", attribute: "aim_offset", name: "Aim offset", suffix: "°C", icon: "mdi:crosshairs",
+    });
+    assert.ok(!JSON.stringify(config).includes("sensor.stue_garden_temperature"));
+
+    // The valve opens again below the target plus the aim offset, minus the hysteresis. The
+    // offset has steps of 0.05 °C, so the temperature has two decimals. Each sentence that names
+    // the target says when the thermostat aims above or below it: "(aiming 0.15 °C higher)".
+    for (const view of [stue, bath, office]) {
+      const status = view.header.card.content;
+      assert.ok(status.includes("{%- set hy = state_attr(e, 'hysteresis') -%}\n{%- set ao = state_attr(e, 'aim_offset') -%}\n{%- set aim = (' (aiming ' ~ (ao | abs | round(2)) ~ ' °C ' ~ ('higher' if ao > 0 else 'lower') ~ ')') if ao is number and ao | round(2) != 0 else '' -%}\n"));
+      assert.ok(status.includes("{% elif r == 'idle' %}## Warm enough\n\nThe room is at or near **{{ tt }}**{{ aim }}, so the valve is closed.{% if hy is number and t is number %} It opens again below **{{ (t + (ao if ao is number else 0) - hy) | round(2) }} °C**.{% endif %}\n"));
+      assert.equal(status.split("{{ aim }}").length - 1, 4);
+    }
+    for (const text of [
+      "It closes at **{{ ct | round(1) }} °C** and lets the floor carry the room the rest of the way to **{{ tt }}**{{ aim }}.{% endif %}",
+      "{% elif r == 'predictive_close' %}## Closing early\n\nThe floor holds enough heat to reach **{{ tt }}**{{ aim }}, so the valve closes now.",
+      "{% elif r == 'coasting' %}## Coasting\n\nThe valve closed early. The floor keeps warming the room towards **{{ tt }}**{{ aim }}.",
+    ]) {
+      assert.ok(stue.header.card.content.includes(text), text);
+    }
+    // Otherwise the thermostat's page stays as it was
+    assert.deepEqual(controllerRows(stue), [
+      ...FIRST_ROWS, "Room sensor", "Return water", "Supply water", "Supply − return", "Hot water arriving", "Loop saturated", "Prediction",
+    ]);
+    assert.deepEqual(sectionTitles(stue), [
+      "thermostat", "Room vs target, last 48 h", "Controller", "Sensors and valve", "Water temperatures, last 48 h",
+      "What SmartHeat has learned", "Overshoot learning, last 14 days", "Valve open per day",
+      "Holding difference vs outdoor, last 60 days", "Settings",
+    ]);
+  });
+
+  test("zones like SmartHeat 0.4.0 on the thermostat build as on 0.3.1, apart from the aim offset, the method check and the tickle warnings", () => {
+    const before = build(thermostatSnapshot(3)).config;
+    const after = structuredClone(build(thermostatSnapshot(4)).config);
+
+    // Take out what SmartHeat 0.4.0 adds, and the config is the one SmartHeat 0.3.1 zones get.
+    // The notice also shows when a zone switches to the tickle, and the overview warns when such
+    // a zone loses a sensor.
+    const K = "['climate.stue', 'climate.badevaerelse', 'climate.kontor']";
+    const notice = after.views[0].sections[0];
+    const check = ` or (${K} | select('is_state_attr', 'strategy', 'tickle') | list) | count > 0`;
+    assert.ok(notice.visibility[0].value_template.endsWith(`${check} }}`));
+    notice.visibility[0].value_template = notice.visibility[0].value_template.replace(check, "");
+    const set = `\n{%- set switched = ${K} | select('is_state_attr', 'strategy', 'tickle') | list -%}`;
+    const sentence = "{% if switched %} Control method differs from this page: {% for e in switched %}{{ names.get(e, e) }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}";
+    assert.ok(notice.cards[0].content.includes(set) && notice.cards[0].content.includes(`.{% endif %}${sentence} Run the Heating`));
+    notice.cards[0].content = notice.cards[0].content.replace(set, "").replace(sentence, "");
+    const summary = after.views[0].header.card;
+    const tickleLine = (line) => line.startsWith("{%- elif state_attr(e, 'fallback') == ") || line.startsWith("{%- elif r == 'return_sensor_unavailable' -%}");
+    assert.equal(summary.content.split("\n").filter(tickleLine).length, 4);
+    summary.content = summary.content.split("\n").filter((line) => !tickleLine(line)).join("\n");
+    for (const view of after.views.filter((v) => v.path.startsWith("zone-"))) {
+      view.header.card.content = view.header.card.content
+        .replace(/\n\{%- set ao = [^\n]*\n\{%- set aim = [^\n]*/, "")
+        .replaceAll("{{ aim }}", "")
+        .replace("(t + (ao if ao is number else 0) - hy) | round(2)", "(t - hy) | round(1)");
+      const settings = findSection(view, "Settings").cards[1];
+      settings.entities = settings.entities.filter((r) => r.attribute !== "aim_offset");
+    }
+    assert.deepEqual(after, before);
+  });
+
+  test("tickle zones (SmartHeat 0.4.0): sensors, charts, learned values and settings", () => {
+    const snap = tickleSnapshot();
+    const { config, warnings, zones } = build(snap);
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(zones.map((z) => [z.path, z.learned, z.inputs, z.tuning]), [
+      ["zone-stue", 10, 4, 9], ["zone-kokken", 9, 4, 9], ["zone-kontor", 9, 3, 9], ["zone-badevaerelse", 7, 3, 10],
+    ]);
+    const [stue, kitchen, office, bath] = TICKLE_VIEWS.map((p) => viewByPath(config, p));
+    for (const view of [stue, kitchen, office]) {
+      assert.equal(view.icon, "mdi:heating-coil");
+      assert.deepEqual(sectionTitles(view), [
+        "thermostat", "Room vs target, last 48 h", "Controller", "Sensors and valve", "Water temperatures, last 48 h",
+        "What SmartHeat has learned", "Return offset, last 14 days", "Valve open per day",
+        "Holding difference vs outdoor, last 60 days", "Settings",
+      ]);
+    }
+
+    // The outdoor temperature in the return target: a sensor's state, or a weather entity's
+    // temperature attribute, which the frontend shows in the weather entity's own unit
+    assert.deepEqual(findSection(stue, "Sensors and valve").cards[1].entities.slice(3), [
+      { entity: "sensor.stue_supply_temperature", name: "Supply water", icon: "mdi:water-thermometer" },
+      { entity: "sensor.stue_garden_temperature", name: "Outdoor temperature", icon: "mdi:thermometer" },
+    ]);
+    assert.deepEqual(findSection(kitchen, "Sensors and valve").cards[1].entities.slice(3), [
+      { type: "attribute", entity: "weather.forecast_test", attribute: "temperature", name: "Outdoor temperature", icon: "mdi:weather-partly-cloudy" },
+      { entity: "binary_sensor.kokken_window", name: "Window", secondary_info: "last_changed" },
+    ]);
+    assert.deepEqual(findSection(office, "Sensors and valve").cards[1].entities.map((r) => r.name), ["Valve", "Room temperature", "Return water"]);
+
+    // Each pulse can be seen ending at the return target
+    assert.deepEqual(findSection(stue, "Water temperatures, last 48 h").cards[1].entities, [
+      { entity: "switch.stue_valve", name: "Valve" },
+      { entity: "sensor.stue_return_temperature", name: "Return" },
+      { entity: "sensor.stue_return_target", name: "Return target" },
+      { entity: "sensor.stue_supply_temperature", name: "Supply" },
+    ]);
+    assert.deepEqual(findSection(office, "Water temperatures, last 48 h").cards[1].entities.map((e) => e.name), ["Valve", "Return", "Return target"]);
+
+    // The return offset comes first, and its chart replaces the overshoot chart. The thermostat's
+    // values stay listed: the pulses started from them.
+    const learned = findSection(office, "What SmartHeat has learned").cards;
+    assert.deepEqual(learned[1].entities.slice(0, 2), [
+      { entity: "sensor.kontor_return_offset", name: "Return offset", icon: "mdi:thermometer-plus" },
+      { entity: "sensor.kontor_return_target", name: "Return target", icon: "mdi:bullseye-arrow" },
+    ]);
+    assert.deepEqual(learned[1].entities.slice(2).map((r) => r.name), [
+      "Learned overshoot", "Last peak vs target", "Holding difference", "Heat storage factor", "Heat-up rate", "Learning cycles", "Valve open (24 h)",
+    ]);
+    assert.equal(learned[2].content, "*Return target* is how warm the return water may get before a pulse ends: the room's target plus the *return offset*, corrected for how far the room is from its target. SmartHeat adjusts the offset slowly, so the room settles on its target. What the thermostat learned, such as the overshoot, stays as it is while the zone pulses.");
+    for (const view of [stue, kitchen]) {
+      assert.ok(findSection(view, "What SmartHeat has learned").cards[2].content.includes("corrected for the outdoor temperature and for how far the room is from its target."));
+    }
+    assert.deepEqual(findSection(office, "Return offset, last 14 days").cards[1], {
+      type: "history-graph", hours_to_show: 336, entities: [{ entity: "sensor.kontor_return_offset", name: "Return offset" }], grid_options: { columns: "full" },
+    });
+
+    // Current tuning: the pulse settings, and the two thermostat settings frost protection still
+    // uses. A reset only starts the return offset again.
+    for (const view of [stue, kitchen, office]) {
+      const rows = findSection(view, "Settings").cards[1].entities;
+      assert.deepEqual(rows.slice(3).map((r) => r.label ?? r.name), [
+        "Current tuning", "Pulse interval", "Minimum pulse", "Hysteresis (frost protection)", "Minimum open time (frost protection)",
+        "Maximum return temperature", "Room sensor silent after (0 = off)", "Eco temperature", "Away temperature", "Frost protection temperature",
+      ]);
+      assert.deepEqual(rows.slice(4, 6).map((r) => [r.attribute, r.suffix, r.icon]), [
+        ["pulse_interval_minutes", "min", "mdi:timer-refresh-outline"], ["pulse_flush_minutes", "min", "mdi:pulse"],
+      ]);
+    }
+    assert.equal(findSection(kitchen, "Settings").cards[1].entities[0].tap_action.confirmation.text,
+      "Reset the return offset of Køkken? It starts again from what the thermostat learned. The thermostat's learning is kept.");
+
+    // The thermostat zone next to them keeps its page
+    assert.ok(findSection(bath, "Overshoot learning, last 14 days"));
+    assert.ok(findSection(bath, "What SmartHeat has learned").cards[2].content.startsWith("*Overshoot*"));
+    assert.equal(findSection(bath, "Settings").cards[1].entities[0].tap_action.confirmation.text,
+      "Forget what SmartHeat has learned about Badeværelse? It starts again from the defaults.");
+    assert.deepEqual(controllerRows(bath), [...FIRST_ROWS, "Return water", "Prediction"]);
+
+    // The same snapshot always gives the same config, whatever the order of its lists
+    assert.equal(JSON.stringify(buildDashboard(structuredClone(snap))), JSON.stringify(buildDashboard(snap)));
+    const shuffled = structuredClone(snap);
+    for (const key of ["get_states", "config/entity_registry/list", "config/device_registry/list", "config_entries/get"]) shuffled[key].reverse();
+    assert.equal(JSON.stringify(build(shuffled).config), JSON.stringify(config));
+  });
+
+  test("tickle zones (SmartHeat 0.4.0): the status, the controller table and the overview warnings", () => {
+    const { config } = build(tickleSnapshot());
+    const [stue, kitchen, office, bath] = TICKLE_VIEWS.map((p) => viewByPath(config, p));
+    const status = office.header.card.content;
+
+    // One branch per reason code, besides the branches the thermostat has too
+    const branches = [
+      "{% if s in ['unavailable', 'unknown'] %}## Not responding",
+      "{% elif r is none %}## Starting",
+      "{% elif r == 'pulse_flush' %}## Pulse: filling the loop",
+      "{% elif r == 'pulse' %}## Pulse: heating",
+      "{% elif r == 'pulse_extended' %}## Pulse extended",
+      "{% elif r == 'return_reached' %}## Return target reached",
+      "{% elif r == 'pulse_skipped' %}## Pulse skipped",
+      "{% elif r == 'waiting' %}## Waiting",
+      "{% elif r == 'timed_pulse' %}## Timed pulses",
+      "{% elif r == 'off' %}## Off",
+      "{% elif r == 'window_open' %}## Paused: window open",
+      "{% elif r == 'max_return_temp' %}## Paused: water too hot",
+      "{% elif r == 'return_sensor_unavailable' %}## Waiting for the return sensor",
+      "{% elif r == 'room_sensor_unavailable' %}## Waiting for the room sensor",
+      "{% elif r == 'frost_protection' %}## Frost protection",
+      "{% else %}## {{ r }}",
+    ];
+    assert.deepEqual(status.split("\n").filter((line) => line.includes("## ")), branches);
+    const shut = "(fd is number and fd | round(0) == 0)";
+    for (const text of [
+      // The return target with one decimal, and the next pulse time in local time
+      "{%- set tg = ('**' ~ (th | round(1)) ~ ' °C**') if th is number else 'its target' -%}",
+      "{%- set np = as_timestamp(state_attr(e, 'next_pulse'), none) -%}\n{%- set at = (' at ' ~ (np | timestamp_custom('%H:%M'))) if np is number else '' -%}",
+      // A closed valve waits for the next pulse time, unless the room sensor is lost and the
+      // share is 0 %: then no pulse comes until a sensor is back, as the warning below says
+      `{%- set until = '' if fb in ['room_sensor', 'sensors'] and ${shut} else (' until the next pulse' ~ at) -%}`,
+      "{%- set every = (' of every ' ~ (pi | round(0)) ~ ' minutes') if pi is number else ' of each interval' -%}",
+      "The valve is open{{ (' for at least ' ~ (pf | round(0)) ~ ' minutes') if pf is number and fb != 'room_sensor' else '' }}, so hot water reaches the end of the loop.",
+      "The valve stays open until the return water reaches {{ tg }}{% if fb == 'room_sensor' %}, but no longer than the last day's share of this interval{% endif %}.",
+      "The return water is still below {{ tg }}, so the pulse goes on into the next interval.",
+      "{% elif r == 'return_reached' %}## Return target reached\n\nThe return water reached {{ tg }}, so the valve is closed{{ until }}.",
+      "{% elif r == 'pulse_skipped' %}## Pulse skipped\n\nThe room was warm enough, so the valve stays closed{{ until }}.",
+      "{% elif r == 'waiting' %}## Waiting\n\nThe valve is closed{{ until }}.",
+      "The valve is open for a set time.",
+      "There is no reading from the return sensor right now. The valve keeps its position for a minute or two.",
+      "{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'There is no reading from the room sensor right now.' }} The valve keeps its position for a minute or two.",
+      "for this zone, so the valve stays closed to protect the floor.",
+    ]) {
+      assert.ok(status.includes(text), text);
+    }
+    assert.equal(status.split("until the next pulse").length - 1, 1, "only the until line promises the next pulse");
+
+    // Without a sensor the zone keeps heating on the same grid: a warning says how, whatever the
+    // valve does now. At 0 % the valve stays closed.
+    const alert = status.slice(status.indexOf("{% if fb in ['room_sensor', 'return_sensor', 'sensors'] %}"));
+    assert.ok(alert.startsWith("{% if fb in ['room_sensor', 'return_sensor', 'sensors'] %}\n> [!WARNING]\n> {% if fb == 'room_sensor' %}"));
+    for (const text of [
+      `{% if ${shut} %}The valve was hardly open over the last day, so it stays closed until the sensor is back.{% else %}SmartHeat pulses on the return temperature alone{{ (', and opens the valve at most **' ~ (fd | round(0)) ~ ' %**' ~ every) if fd is number else '' }}.{% endif %}`,
+      "{% elif fb == 'return_sensor' %}{{ 'The return temperature does not change when the valve opens.' if rt is number else 'The return sensor has no reading.' }} SmartHeat opens the valve for a set time instead",
+      `{% if ${shut} %}; for now it stays closed{% elif fd is number %}: **{{ fd | round(0) }} %**{{ every }}, set by the room temperature{% endif %}.`,
+      "{% else %}Both the room and the return sensor are lost, so SmartHeat ",
+      "heats by the last day's average{{ (': the valve opens **' ~ (fd | round(0)) ~ ' %**' ~ every) if fd is number else '' }}.{% endif %} Check the sensors' batteries and connections.{% endif %}\n\n{% endif %}",
+    ]) {
+      assert.ok(alert.includes(text), text);
+    }
+    // The pulses learn no overshoot, and the notes on the water need a supply sensor
+    for (const part of ["close_threshold", "predictive_close", "learning_cycles", "no_heat_source"]) assert.ok(!status.includes(part), part);
+    assert.ok(stue.header.card.content.endsWith("> No hot water is reaching the loop: the supply pipe is barely warmer than the room. Check that the boiler or heat pump is running.\n\n{% endif %}{% if state_attr(e, 'loop_saturated') %}\n> [!NOTE]\n> Supply and return are almost equally warm: the loop is giving the room all the heat it can.\n\n{% endif %}"));
+
+    // The controller table shows the pulses instead of the prediction. The outdoor row needs an
+    // outdoor entity; the supply rows need a supply sensor.
+    const pulseRows = ["Decision", "Valve", "Target now", "Comfort target", "Control method", "Return target", "Return water", "Return offset"];
+    const after = ["Next pulse", "Calibrating", "Fallback", "Room sensor"];
+    assert.deepEqual(controllerRows(stue), [...pulseRows, "Outdoor", ...after, "Supply water", "Supply − return", "Hot water arriving", "Loop saturated"]);
+    assert.deepEqual(controllerRows(kitchen), [...pulseRows, "Outdoor", ...after]);
+    assert.deepEqual(controllerRows(office), [...pulseRows, ...after]);
+    const table = findSection(office, "Controller").cards[1].content;
+    for (const reason of [
+      "pulse_flush", "pulse", "pulse_extended", "return_reached", "pulse_skipped", "timed_pulse",
+      "off", "window_open", "max_return_temp", "return_sensor_unavailable", "room_sensor_unavailable", "frost_protection",
+    ]) {
+      assert.match(table, new RegExp(`[{ ]'${reason}': '[A-Z]`), reason);
+    }
+    // Like the status, the decision waits for a sensor when the room sensor is lost at 0 %, and
+    // no pulse time is shown
+    assert.ok(table.includes(`{%- set fd = state_attr(e, 'fallback_duty') -%}\n{%- set shut = fb in ['room_sensor', 'sensors'] and ${shut} -%}\n{%- set waiting = 'Waiting for a sensor' if shut else 'Waiting for the next pulse' -%}\n`));
+    assert.ok(table.includes(" 'waiting': waiting, "));
+    for (const text of [
+      "{%- set ro = states('sensor.kontor_return_offset') -%}",
+      "| Control method | {{ {'thermostat': 'Thermostat', 'tickle': 'Tickle pulses'}.get(state_attr(e, 'strategy'), '–') if ok else '–' }} |",
+      "| Return target | {{ deg(state_attr(e, 'return_threshold'), 2) }} |",
+      "| Return offset | {{ ((ro | float) | round(2) ~ ' °C') if ok and ro | is_number else '–' }} |",
+      "| Next pulse | {{ (np | timestamp_custom('%H:%M')) if ok and np is number and not shut else '–' }} |",
+      "| Calibrating | {{ ('Yes' if state_attr(e, 'calibrating') else 'No') if ok else '–' }} |",
+      "| Fallback | {{ ({'room_sensor': 'Room sensor lost', 'return_sensor': 'Return sensor lost', 'sensors': 'Room and return sensors lost'}.get(fb, fb) if fb else 'No') if ok else '–' }} |",
+      "Reason code: `{{ r }}`",
+    ]) {
+      assert.ok(table.includes(text), text);
+    }
+    assert.ok(findSection(stue, "Controller").cards[1].content.includes("| Outdoor | {{ deg(state_attr(e, 'outside_temperature'), 1) }} |"));
+    assert.ok(!table.includes("trained"));
+
+    // The overview warns when a tickle zone has lost a sensor, or waits for one
+    const summary = config.views[0].header.card.content;
+    for (const text of [
+      `{%- elif state_attr(e, 'fallback') == 'room_sensor' -%}{%- set ns.warn = ns.warn + [n ~ (': room sensor lost, valve closed' if ${shut} else ': room sensor lost, pulsing on the return temperature')] -%}`,
+      "{%- elif state_attr(e, 'fallback') == 'return_sensor' -%}{%- set ns.warn = ns.warn + [n ~ ': return sensor lost, timed pulses'] -%}",
+      `{%- elif state_attr(e, 'fallback') == 'sensors' -%}{%- set ns.warn = ns.warn + [n ~ (': room and return sensors lost, valve closed' if ${shut} else ': room and return sensors lost, heating by the last day\\'s average')] -%}`,
+      "{%- elif r == 'room_sensor_unavailable' -%}{%- set ns.warn = ns.warn + [n ~ ': waiting for the room sensor'] -%}\n{%- elif r == 'return_sensor_unavailable' -%}{%- set ns.warn = ns.warn + [n ~ ': waiting for the return sensor'] -%}",
+    ]) {
+      assert.ok(summary.includes(text), text);
+    }
+    // The thermostat's hold still comes first, so its texts stay as in SmartHeat 0.3.1
+    assert.ok(summary.indexOf("{%- elif r == 'room_sensor_lost' -%}") < summary.indexOf("{%- elif state_attr(e, 'fallback') == 'room_sensor' -%}"));
+    // ...and its page has none of the tickle's
+    assert.ok(!bath.header.card.content.includes("pulse"));
+  });
+
+  test("the notice also shows when a zone switches its control method (SmartHeat 0.4.0)", () => {
+    const { config } = build(tickleSnapshot());
+    const K = "['climate.stue', 'climate.kokken', 'climate.kontor', 'climate.badevaerelse']";
+    const switched = "['climate.badevaerelse'] | select('is_state_attr', 'strategy', 'tickle') | list + ['climate.stue', 'climate.kokken', 'climate.kontor'] | select('is_state_attr', 'strategy', 'thermostat') | list";
+    const notice = config.views[0].sections[0];
+    assert.equal(notice.visibility[0].value_template, `{{ states.climate | selectattr('entity_id', 'in', integration_entities('smartheat')) | rejectattr('entity_id', 'in', ${K}) | list | count > 0 or ${K} | reject('in', states.climate | map(attribute='entity_id') | list) | list | count > 0 or (${switched}) | count > 0 }}`);
+    // A zone that reports no control method, such as one that is not responding, has not switched
+    const content = notice.cards[0].content.split("\n");
+    assert.equal(content[5], `{%- set switched = ${switched} -%}`);
+    assert.equal(content[7], "> **The heating zones have changed.**{% if new %} New: {{ new | join(', ') }}.{% endif %}{% if gone %} Removed: {% for e in gone %}{{ names.get(e, e) }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}{% if switched %} Control method differs from this page: {% for e in switched %}{{ names.get(e, e) }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %} Run the Heating dashboard generator again to update this page.{% if new %} Until then, tap here to see {{ 'the new zone' if new | count == 1 else 'the new zones' }} under All rooms.{% endif %}");
+
+    // A zone that was not responding when the page was built has a thermostat page. It counts
+    // once it reports tickle pulses, although its method never changed: hence "differs".
+    const snap = newSnapshot({ areas: [] });
+    addZone(snap, { id: "stue", name: "Stue", version: 4, strategy: "tickle" });
+    addZone(snap, { id: "kontor", name: "Kontor", version: 4, strategy: "tickle", restored: true });
+    const restored = build(snap).config.views[0].sections[0].cards[0].content.split("\n");
+    assert.equal(restored[5], "{%- set switched = ['climate.kontor'] | select('is_state_attr', 'strategy', 'tickle') | list + ['climate.stue'] | select('is_state_attr', 'strategy', 'thermostat') | list -%}");
+    assert.equal(restored[7], content[7]);
+
+    // Zones that do not report a control method (older SmartHeat) have no such check
+    const old = build(twoZoneSnapshot()).config.views[0].sections[0];
+    assert.ok(!old.visibility[0].value_template.includes("strategy"));
+    assert.ok(!old.cards[0].content.includes("switched"));
+  });
+
+  test("the overview warns about a tickle zone's lost sensors whenever the zones tell their control method", () => {
+    // Every zone was on the thermostat at the last run. A zone switched to the tickle since then
+    // shows the notice, and the overview still warns when it loses a sensor: the summary is the
+    // one that a config with tickle zones has, apart from the list of zones.
+    const summary = build(thermostatSnapshot(4)).config.views[0].header.card.content.split("\n");
+    const tickle = build(tickleSnapshot()).config.views[0].header.card.content.split("\n");
+    assert.equal(summary[0], "{%- set zones = ['climate.stue', 'climate.badevaerelse', 'climate.kontor'] -%}");
+    assert.deepEqual(summary.slice(1), tickle.slice(1));
+    assert.ok(summary.includes("{%- elif state_attr(e, 'fallback') == 'return_sensor' -%}{%- set ns.warn = ns.warn + [n ~ ': return sensor lost, timed pulses'] -%}"));
+    // Zones that do not tell their control method (SmartHeat 0.3.1 and older) have no tickle
+    const old = build(thermostatSnapshot(3)).config.views[0].header.card.content;
+    assert.ok(!old.includes("'return_sensor'") && !old.includes("return_sensor_unavailable"));
+  });
+
+  test("a tickle zone with a deleted outdoor sensor keeps its outdoor row, and a disabled return offset drops its chart", () => {
+    const snap = tickleSnapshot();
+    // SmartHeat holds the last outdoor value for a while, so the table and the note keep it
+    snap.get_states = snap.get_states.filter((s) => s.entity_id !== "sensor.stue_garden_temperature");
+    disable(snap, "sensor.kontor_return_offset");
+    const { config } = build(snap);
+    const stue = viewByPath(config, "zone-stue");
+    assert.ok(controllerRows(stue).includes("Outdoor"));
+    assert.ok(!findSection(stue, "Sensors and valve").cards[1].entities.some((r) => r.name === "Outdoor temperature"));
+    assert.ok(findSection(stue, "What SmartHeat has learned").cards[2].content.includes("the outdoor temperature"));
+    const office = viewByPath(config, "zone-kontor");
+    assert.ok(!sectionTitles(office).includes("Return offset, last 14 days"));
+    assert.ok(!sectionTitles(office).includes("Overshoot learning, last 14 days"));
+    assert.ok(!controllerRows(office).includes("Return offset"));
+    assert.ok(!findSection(office, "Controller").cards[1].content.includes("set ro"));
+    assert.equal(findSection(office, "What SmartHeat has learned").cards[1].entities[0].name, "Return target");
+  });
+
+  test("a tickle zone that failed to load is built as a thermostat zone until it responds", () => {
+    const snap = newSnapshot({ areas: [] });
+    addZone(snap, { id: "kontor", name: "Kontor", version: 4, strategy: "tickle", restored: true });
+    const { config, warnings } = build(snap);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /"Kontor" is unavailable/);
+    // Without its attributes the zone has no control method. Its tickle sensors are still in the
+    // registry, so they are listed, but nothing is charted against them.
+    const office = viewByPath(config, "zone-kontor");
+    assert.ok(office.header.card.content.includes("{% elif r == 'predictive_close' %}## Closing early"));
+    assert.deepEqual(sectionTitles(office), [
+      "thermostat", "Room vs target, last 48 h", "Controller", "What SmartHeat has learned",
+      "Overshoot learning, last 14 days", "Valve open per day", "Settings",
+    ]);
+    assert.deepEqual(findSection(office, "What SmartHeat has learned").cards[1].entities.slice(0, 2).map((r) => r.name), ["Return offset", "Return target"]);
+  });
+
   test("an unavailable or deleted water sensor keeps its controller rows, and the water chart shows the ones that exist", () => {
     const snap = newSnapshot({ areas: [] });
     addZone(snap, { id: "a", name: "Alpha", supply: true });
@@ -801,6 +1221,18 @@ describe("checkConfig", () => {
     assert.ok(problems.some((p) => p.includes("trend-graph needs a sensor")));
     assert.ok(problems.some((p) => p.endsWith('.cards[1].entities[2]: bad link "https://example.com/device"')), problems.join("\n"));
     assert.ok(problems.some((p) => p.includes("duplicate path zone-stue")));
+  });
+
+  test("flags a tickle zone's outdoor sensor and return target once they are not usable", () => {
+    const snap = tickleSnapshot();
+    const { config } = build(snap);
+    disable(snap, "sensor.stue_garden_temperature");
+    disable(snap, "sensor.kontor_return_target");
+    const problems = checkConfig(config, snap);
+    // The outdoor row, and the return target in the water chart and the learned values
+    assert.equal(problems.filter((p) => p.includes('"sensor.stue_garden_temperature" is not usable')).length, 1, problems.join("\n"));
+    assert.equal(problems.filter((p) => p.includes('"sensor.kontor_return_target" is not usable')).length, 2, problems.join("\n"));
+    assert.equal(problems.length, 3, problems.join("\n"));
   });
 
   test("the save message always names the Heating dashboard", () => {

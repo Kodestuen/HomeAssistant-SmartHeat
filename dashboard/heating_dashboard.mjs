@@ -75,8 +75,11 @@ const SYSTEM = {
 const MODEL_SYSTEMS = { "Underfloor heating zone": "underfloor", "Radiator zone": "radiator" };
 
 // Diagnostic sensor role (unique_id suffix) -> label, icon. Also the row order of
-// "What SmartHeat has learned".
+// "What SmartHeat has learned". SmartHeat 0.4.0 adds the return offset and return target of a
+// tickle zone; a thermostat zone never has them.
 const ROLES = [
+  ["return_offset", "Return offset", "mdi:thermometer-plus"],
+  ["return_target", "Return target", "mdi:bullseye-arrow"],
   ["learned_overshoot", "Learned overshoot", "mdi:chart-bell-curve"],
   ["last_peak_error", "Last peak vs target", "mdi:target"],
   ["holding_difference", "Holding difference", "mdi:thermometer-lines"],
@@ -90,18 +93,28 @@ const ROLES = [
 // Tuning attributes (SmartHeat 0.2.0 exposes the option keys verbatim): name, suffix, icon.
 // SmartHeat 0.3.1 adds room_sensor_silent_hours to underfloor zones, where 0 turns the check
 // off. The row can only show "0 h", so its name says what 0 means.
+// SmartHeat 0.4.0 adds the aim offset and the pulse settings. The last column names the only
+// control method that uses a row; the other method's zones leave it out.
 const TUNING = [
+  ["aim_offset", "Aim offset", "°C", "mdi:crosshairs", "thermostat"],
+  ["pulse_interval_minutes", "Pulse interval", "min", "mdi:timer-refresh-outline", "tickle"],
+  ["pulse_flush_minutes", "Minimum pulse", "min", "mdi:pulse", "tickle"],
   ["hysteresis", "Hysteresis", "°C", "mdi:arrow-up-down"],
   ["min_open_minutes", "Minimum open time", "min", "mdi:valve-open"],
-  ["min_closed_minutes", "Minimum closed time", "min", "mdi:valve-closed"],
-  ["coast_window_minutes", "Coast window", "min", "mdi:timer-sand"],
+  ["min_closed_minutes", "Minimum closed time", "min", "mdi:valve-closed", "thermostat"],
+  ["coast_window_minutes", "Coast window", "min", "mdi:timer-sand", "thermostat"],
   ["max_return_temp", "Maximum return temperature", "°C", "mdi:thermometer-alert"],
-  ["sensor_timeout_minutes", "Room sensor timeout", "min", "mdi:timer-alert-outline"],
+  ["sensor_timeout_minutes", "Room sensor timeout", "min", "mdi:timer-alert-outline", "thermostat"],
   ["room_sensor_silent_hours", "Room sensor silent after (0 = off)", "h", "mdi:signal-off"],
   ["eco_temp", "Eco temperature", "°C", "mdi:leaf"],
   ["away_temp", "Away temperature", "°C", "mdi:account-arrow-right"],
   ["frost_temp", "Frost protection temperature", "°C", "mdi:snowflake-thermometer"],
 ];
+// Tickle zones use these thermostat settings for frost protection only
+const FROST_TUNING = {
+  hysteresis: "Hysteresis (frost protection)",
+  min_open_minutes: "Minimum open time (frost protection)",
+};
 
 // Whole-house buttons: label, icon, color, preset, confirmation
 const WHOLE_HOUSE = [
@@ -112,13 +125,14 @@ const WHOLE_HOUSE = [
 
 // Every icon this generator emits; all are in MDI 7.4.47, bundled with frontend 20260930.3
 const MDI_ICONS = new Set([
-  "account-arrow-right", "arrow-up-down", "book-open-variant", "brain", "chart-bell-curve",
-  "chart-line", "chart-multiline", "chart-timeline-variant", "cog", "counter", "devices",
-  "heat-wave", "heating-coil", "home-group", "home-thermometer", "leaf", "pipe-valve", "plus",
-  "radiator", "restore", "scale-balance", "school", "signal-off", "snowflake-thermometer", "sofa",
-  "swap-vertical", "target", "thermometer", "thermometer-alert", "thermometer-chevron-up",
-  "thermometer-lines", "thermometer-water", "timer-alert-outline", "timer-sand", "tune", "valve",
-  "valve-closed", "valve-open", "water-thermometer", "weather-partly-cloudy",
+  "account-arrow-right", "arrow-up-down", "book-open-variant", "brain", "bullseye-arrow",
+  "chart-bell-curve", "chart-line", "chart-multiline", "chart-timeline-variant", "cog", "counter",
+  "crosshairs", "devices", "heat-wave", "heating-coil", "home-group", "home-thermometer", "leaf",
+  "pipe-valve", "plus", "pulse", "radiator", "restore", "scale-balance", "school", "signal-off",
+  "snowflake-thermometer", "sofa", "swap-vertical", "target", "thermometer", "thermometer-alert",
+  "thermometer-chevron-up", "thermometer-lines", "thermometer-plus", "thermometer-water",
+  "timer-alert-outline", "timer-refresh-outline", "timer-sand", "tune", "valve", "valve-closed",
+  "valve-open", "water-thermometer", "weather-partly-cloudy",
 ]);
 
 // The climate view strategy (All rooms) shows these covers: device class none or one of
@@ -267,6 +281,10 @@ function discoverZones(S) {
     const system = [a.system_type, device?.model_id, MODEL_SYSTEMS[device?.model]]
       .find((v) => v === "underfloor" || v === "radiator") ?? "unknown";
     const input = (key) => (usable(S, a[key]) ? a[key] : null); // SmartHeat 0.2.0 attributes
+    // SmartHeat 0.4.0 runs an underfloor zone as a thermostat or with tickle pulses. A zone
+    // without the attribute is a thermostat.
+    const tickle = a.strategy === "tickle";
+    const method = tickle ? "tickle" : "thermostat";
     const zone = {
       entry_id: entry.entry_id,
       device_id: device?.id ?? null,
@@ -274,15 +292,18 @@ function discoverZones(S) {
       climate: roles.climate,
       name,
       system,
+      tickle,
       valve: input("valve_entity_id"),
       room: input("room_sensor_entity_id"),
       ret: input("return_sensor_entity_id"),
       supply: input("supply_sensor_entity_id"),
       window: input("window_sensor_entity_id"),
+      outside: input("outside_sensor_entity_id"), // SmartHeat 0.4.0: a sensor or a weather entity
       invert: a.invert_valve === true,
       hvacModes: Array.isArray(a.hvac_modes) && a.hvac_modes.length ? a.hvac_modes : DEFAULT_HVAC_MODES,
       presetModes: Array.isArray(a.preset_modes) && a.preset_modes.length ? a.preset_modes : DEFAULT_PRESET_MODES,
-      tuning: TUNING.filter(([attr]) => typeof a[attr] === "number"),
+      tuning: TUNING.filter(([attr, , , , only]) => typeof a[attr] === "number" && (only ?? method) === method)
+        .map(([attr, name, suffix, icon]) => [attr, (tickle && FROST_TUNING[attr]) || name, suffix, icon]),
       state: S.states.get(roles.climate).state,
     };
     zone.hasSupply = Boolean(zone.supply || "supply_temperature" in a || roles.supply_return_difference);
@@ -292,6 +313,12 @@ function discoverZones(S) {
     if (!zone.hasReturn) zone.tuning = zone.tuning.filter(([attr]) => attr !== "max_return_temp"); // nothing to limit
     // SmartHeat 0.3.1 tells whether an underfloor zone's room sensor has gone silent
     zone.hasRoomSilent = "room_silent" in a;
+    // SmartHeat 0.4.0 tells the control method and the aim offset. Only the tickle uses the
+    // outdoor temperature, and it holds the last value for a while, so the zone still has one
+    // when the configured entity is deleted.
+    zone.hasStrategy = "strategy" in a;
+    zone.hasAimOffset = "aim_offset" in a;
+    zone.hasOutside = typeof a.outside_sensor_entity_id === "string";
     zone.area = S.entityById.get(zone.climate)?.area_id ?? device?.area_id ?? (zone.room ? effectiveArea(S, zone.room) : null);
     if (zone.state === "unavailable" || zone.state === "unknown") {
       warnings.push(`Zone "${name}" is ${zone.state}, so its page may lack details. Re-run when the zone responds again.`);
@@ -364,27 +391,68 @@ const HOLD_SHUT = "(fd is number and fd | round(0) == 0)";
 // T1: no SmartHeat zone is running
 const T1 = "{{ states.climate | selectattr('entity_id', 'in', integration_entities('smartheat')) | list | count == 0 }}";
 
-// T2a: the running zones differ from the ones this config was built for
-function T2a(known) {
-  const K = jlist(known);
-  return `{{ states.climate | selectattr('entity_id', 'in', integration_entities('smartheat')) | rejectattr('entity_id', 'in', ${K}) | list | count > 0 or ${K} | reject('in', states.climate | map(attribute='entity_id') | list) | list | count > 0 }}`;
+// SmartHeat 0.4.0: the zones that now report another control method than the one their page
+// was built for, as a Jinja list expression. A zone without the attribute, such as one that is
+// not responding, does not count. A zone that was not responding when the page was built has a
+// thermostat page, so it counts once it reports tickle pulses, although its method never changed.
+function switchedZones(zones) {
+  const thermostat = zones.filter((z) => !z.tickle).map((z) => z.climate);
+  const tickle = zones.filter((z) => z.tickle).map((z) => z.climate);
+  const parts = [];
+  if (thermostat.length) parts.push(`${jlist(thermostat)} | select('is_state_attr', 'strategy', 'tickle') | list`);
+  if (tickle.length) parts.push(`${jlist(tickle)} | select('is_state_attr', 'strategy', 'thermostat') | list`);
+  return parts.join(" + ");
 }
 
-// T2b: the notice text
+// Whether the zones tell their control method (SmartHeat 0.4.0), so a switch can be noticed
+const knowsMethods = (zones) => zones.some((z) => z.hasStrategy);
+
+// T2a: the running zones differ from the ones this config was built for. With SmartHeat 0.4.0
+// a zone that switched its control method counts too, as its page no longer fits.
+function T2a(zones) {
+  const K = jlist(zones.map((z) => z.climate));
+  const switched = knowsMethods(zones) ? ` or (${switchedZones(zones)}) | count > 0` : "";
+  return `{{ states.climate | selectattr('entity_id', 'in', integration_entities('smartheat')) | rejectattr('entity_id', 'in', ${K}) | list | count > 0 or ${K} | reject('in', states.climate | map(attribute='entity_id') | list) | list | count > 0${switched} }}`;
+}
+
+// T2b: the notice text. A zone's control method may differ from its page without a switch (see
+// switchedZones), so the notice does not say that the method changed.
 function T2b(zones) {
-  return [
+  const methods = knowsMethods(zones);
+  const lines = [
     `{%- set known = ${jlist(zones.map((z) => z.climate))} -%}`,
     `{%- set names = ${jdict(zones.map((z) => [z.climate, z.name]))} -%}`,
     "{%- set present = states.climate | map(attribute='entity_id') | list -%}",
     "{%- set new = states.climate | selectattr('entity_id', 'in', integration_entities('smartheat')) | rejectattr('entity_id', 'in', known) | map(attribute='name') | list -%}",
     "{%- set gone = known | reject('in', present) | list -%}",
+  ];
+  if (methods) lines.push(`{%- set switched = ${switchedZones(zones)} -%}`);
+  const switchedText = methods
+    ? "{% if switched %} Control method differs from this page: {% for e in switched %}{{ names.get(e, e) }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}"
+    : "";
+  lines.push(
     "> [!NOTE]",
-    "> **The heating zones have changed.**{% if new %} New: {{ new | join(', ') }}.{% endif %}{% if gone %} Removed: {% for e in gone %}{{ names.get(e, e) }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %} Run the Heating dashboard generator again to update this page.{% if new %} Until then, tap here to see {{ 'the new zone' if new | count == 1 else 'the new zones' }} under All rooms.{% endif %}",
-  ].join("\n");
+    `> **The heating zones have changed.**{% if new %} New: {{ new | join(', ') }}.{% endif %}{% if gone %} Removed: {% for e in gone %}{{ names.get(e, e) }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}${switchedText} Run the Heating dashboard generator again to update this page.{% if new %} Until then, tap here to see {{ 'the new zone' if new | count == 1 else 'the new zones' }} under All rooms.{% endif %}`,
+  );
+  return lines.join("\n");
 }
 
-// T3: the overview summary (view header)
-function T3(known) {
+// SmartHeat 0.4.0 tickle zones keep heating when a sensor is lost: on the return temperature
+// without the room sensor, with timed pulses without the return sensor, and by the last day's
+// average without both. A share of 0 % keeps the valve closed. They wait for a missing reading
+// for a minute or two first.
+const T3_TICKLE_LOST = [
+  `{%- elif state_attr(e, 'fallback') == 'room_sensor' -%}{%- set ns.warn = ns.warn + [n ~ (': room sensor lost, valve closed' if ${HOLD_SHUT} else ': room sensor lost, pulsing on the return temperature')] -%}`,
+  "{%- elif state_attr(e, 'fallback') == 'return_sensor' -%}{%- set ns.warn = ns.warn + [n ~ ': return sensor lost, timed pulses'] -%}",
+  `{%- elif state_attr(e, 'fallback') == 'sensors' -%}{%- set ns.warn = ns.warn + [n ~ (': room and return sensors lost, valve closed' if ${HOLD_SHUT} else ${jstr(": room and return sensors lost, heating by the last day's average")})] -%}`,
+];
+const T3_TICKLE_WAIT = "{%- elif r == 'return_sensor_unavailable' -%}{%- set ns.warn = ns.warn + [n ~ ': waiting for the return sensor'] -%}";
+
+// T3: the overview summary (view header). The tickle lines are there whenever the zones tell
+// their control method (SmartHeat 0.4.0), so a zone that switches to the tickle after this run
+// still gets its warnings. They never match a thermostat zone: its fallback only comes with
+// room_sensor_lost, which the lines before them catch, and it never waits for a return sensor.
+function T3(known, methods) {
   return [
     `{%- set zones = ${jlist(known)} -%}`,
     "{%- set present = states.climate | map(attribute='entity_id') | list -%}",
@@ -404,7 +472,9 @@ function T3(known) {
     "{%- set fd = state_attr(e, 'fallback_duty') -%}",
     `{%- if r == 'room_sensor_lost' and state_attr(e, 'fallback') == 'room_sensor' and not ${HOLD_SHUT} -%}{%- set ns.warn = ns.warn + [n ~ ${jstr(": room sensor lost, heating by the last day's average")}] -%}`,
     "{%- elif r == 'room_sensor_lost' -%}{%- set ns.warn = ns.warn + [n ~ ': room sensor lost, valve closed'] -%}",
+    ...(methods ? T3_TICKLE_LOST : []),
     "{%- elif r == 'room_sensor_unavailable' -%}{%- set ns.warn = ns.warn + [n ~ ': waiting for the room sensor'] -%}",
+    ...(methods ? [T3_TICKLE_WAIT] : []),
     "{%- elif r == 'max_return_temp' -%}{%- set ns.warn = ns.warn + [n ~ ': water too hot, valve closed'] -%}",
     "{%- elif r == 'window_open' -%}{%- set ns.note = ns.note + [n ~ ': window open, heating paused'] -%}",
     "{%- elif r == 'frost_protection' -%}{%- set ns.note = ns.note + [n ~ ': frost protection is heating'] -%}",
@@ -429,45 +499,19 @@ function T3(known) {
   ].join("\n");
 }
 
-// T4: the zone status (zone view header)
-function T4(z) {
-  const w = SYSTEM[z.system];
-  const lines = [
-    `{%- set e = ${jstr(z.climate)} -%}`,
-    "{%- set s = states(e) -%}",
-    "{%- set r = state_attr(e, 'reason') -%}",
-    "{%- set t = state_attr(e, 'temperature') -%}",
-    "{%- set ct = state_attr(e, 'close_threshold') -%}",
-    "{%- set rt = state_attr(e, 'return_temperature') -%}",
-    "{%- set tt = (t | round(1) ~ ' °C') if t is number else 'the target' -%}",
-    "{%- set hy = state_attr(e, 'hysteresis') -%}",
-    "{%- set mr = state_attr(e, 'max_return_temp') -%}",
-    "{%- set ft = state_attr(e, 'frost_temp') -%}",
-    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
-    "{% if s in ['unavailable', 'unknown'] %}## Not responding",
-    "",
-    "SmartHeat can't control this zone right now. Check the zone under Settings at the bottom of this page.",
-    "{% elif r is none %}## Starting",
-    "",
-    "SmartHeat makes its first decision within a minute.",
-    "{% elif r == 'heating' %}## Heating",
-    "",
-    `The valve is open.{% if ct is number %} It closes at **{{ ct | round(1) }} °C** and lets ${w.emitter} carry the room the rest of the way to **{{ tt }}**.{% endif %}`,
-    "{% elif r == 'min_open_time' %}## Heating",
-    "",
-    "The valve is open and stays open a few more minutes, so the actuator can open fully.",
-    "{% elif r == 'predictive_close' %}## Closing early",
-    "",
-    `${w.holds} enough heat to reach **{{ tt }}**, so the valve closes now.`,
-    "{% elif r == 'coasting' %}## Coasting",
-    "",
-    `The valve closed early. ${w.keeps} warming the room towards **{{ tt }}**.`,
-    "{% elif r == 'idle' %}## Warm enough",
-    "",
-    "The room is at or near **{{ tt }}**, so the valve is closed.{% if hy is number and t is number %} It opens again below **{{ (t - hy) | round(1) }} °C**.{% endif %}",
-    "{% elif r == 'min_closed_time' %}## Waiting",
-    "",
-    "The valve stays closed a few more minutes before it may open again.",
+// T4 parts both control methods share: the zone is not responding or starting, the safety
+// rules, and the notes on the water in the loop
+const T4_START = [
+  "{% if s in ['unavailable', 'unknown'] %}## Not responding",
+  "",
+  "SmartHeat can't control this zone right now. Check the zone under Settings at the bottom of this page.",
+  "{% elif r is none %}## Starting",
+  "",
+  "SmartHeat makes its first decision within a minute.",
+];
+
+function t4Safety(w) {
+  return [
     "{% elif r == 'off' %}## Off",
     "",
     "This zone is switched off. Frost protection still opens the valve {{ ('below ' ~ (ft | round(1)) ~ ' °C') if ft is number else 'if the room gets very cold' }}.",
@@ -477,22 +521,19 @@ function T4(z) {
     "{% elif r == 'max_return_temp' %}## Paused: water too hot",
     "",
     `The return water is {{ (rt | round(1) ~ ' °C') if rt is number else 'too hot' }}, above {{ ('the ' ~ (mr | round(1)) ~ ' °C limit') if mr is number else 'the limit' }} for this zone, ${w.tooHot}.`,
-    "{% elif r == 'room_sensor_unavailable' %}## Waiting for the room sensor",
-    "",
-    // SmartHeat 0.3.1: a silent sensor may still show its last value
-    "{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'There is no reading from the room sensor right now.' }} The valve keeps its position for a while.",
-    "{% elif r == 'room_sensor_lost' %}## Room sensor lost",
-    "",
-    // SmartHeat 0.3.1: an underfloor zone keeps heating by the last day's average, or keeps the
-    // valve closed if it was hardly open over the last day. A silent sensor may still show its
-    // last value.
-    `{% if state_attr(e, 'fallback') == 'room_sensor' %}The room sensor {{ 'has stopped reporting (it may still show its last value)' if state_attr(e, 'room_silent') else 'has had no reading for too long' }}, so SmartHeat {% if ${HOLD_SHUT} %}follows the last day's average. The valve was hardly open over the last day, so it stays closed until the sensor is back.{% else %}keeps heating by the last day's average{{ (': the valve opens **' ~ (fd | round(0)) ~ ' %** of every ${HOLD_INTERVAL_MIN} minutes') if fd is number else '' }}.{% endif %} Check the sensor's battery and connection.{% else %}No reading for too long, so the valve is closed for safety. Check the sensor's battery and connection.{% endif %}`,
-    "{% elif r == 'frost_protection' %}## Frost protection",
-    "",
-    "The room is very cold, so the valve is open to protect it.",
-    "{% else %}## {{ r }}",
-    "{% endif %}",
   ];
+}
+
+const T4_END = [
+  "{% elif r == 'frost_protection' %}## Frost protection",
+  "",
+  "The room is very cold, so the valve is open to protect it.",
+  "{% else %}## {{ r }}",
+  "{% endif %}",
+];
+
+function t4Water(z) {
+  const lines = [];
   if (z.hasSupply) {
     lines.push(
       "{% if state_attr(e, 'no_heat_source') %}",
@@ -511,6 +552,69 @@ function T4(z) {
     }
     lines.push("{% endif %}");
   }
+  return lines;
+}
+
+// T4: the zone status (zone view header)
+function T4(z) {
+  if (z.tickle) return T4Tickle(z);
+  const w = SYSTEM[z.system];
+  // SmartHeat 0.4.0: each sentence that names the target says when the thermostat aims above or
+  // below it
+  const aim = z.hasAimOffset ? "{{ aim }}" : "";
+  const lines = [
+    `{%- set e = ${jstr(z.climate)} -%}`,
+    "{%- set s = states(e) -%}",
+    "{%- set r = state_attr(e, 'reason') -%}",
+    "{%- set t = state_attr(e, 'temperature') -%}",
+    "{%- set ct = state_attr(e, 'close_threshold') -%}",
+    "{%- set rt = state_attr(e, 'return_temperature') -%}",
+    "{%- set tt = (t | round(1) ~ ' °C') if t is number else 'the target' -%}",
+    "{%- set hy = state_attr(e, 'hysteresis') -%}",
+    // SmartHeat 0.4.0: the thermostat aims at the target plus the aim offset
+    ...(z.hasAimOffset ? [
+      "{%- set ao = state_attr(e, 'aim_offset') -%}",
+      "{%- set aim = (' (aiming ' ~ (ao | abs | round(2)) ~ ' °C ' ~ ('higher' if ao > 0 else 'lower') ~ ')') if ao is number and ao | round(2) != 0 else '' -%}",
+    ] : []),
+    "{%- set mr = state_attr(e, 'max_return_temp') -%}",
+    "{%- set ft = state_attr(e, 'frost_temp') -%}",
+    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
+    ...T4_START,
+    "{% elif r == 'heating' %}## Heating",
+    "",
+    `The valve is open.{% if ct is number %} It closes at **{{ ct | round(1) }} °C** and lets ${w.emitter} carry the room the rest of the way to **{{ tt }}**${aim}.{% endif %}`,
+    "{% elif r == 'min_open_time' %}## Heating",
+    "",
+    "The valve is open and stays open a few more minutes, so the actuator can open fully.",
+    "{% elif r == 'predictive_close' %}## Closing early",
+    "",
+    `${w.holds} enough heat to reach **{{ tt }}**${aim}, so the valve closes now.`,
+    "{% elif r == 'coasting' %}## Coasting",
+    "",
+    `The valve closed early. ${w.keeps} warming the room towards **{{ tt }}**${aim}.`,
+    "{% elif r == 'idle' %}## Warm enough",
+    "",
+    // The aim offset moves the point where the valve opens again; it has steps of 0.05 °C
+    z.hasAimOffset
+      ? "The room is at or near **{{ tt }}**{{ aim }}, so the valve is closed.{% if hy is number and t is number %} It opens again below **{{ (t + (ao if ao is number else 0) - hy) | round(2) }} °C**.{% endif %}"
+      : "The room is at or near **{{ tt }}**, so the valve is closed.{% if hy is number and t is number %} It opens again below **{{ (t - hy) | round(1) }} °C**.{% endif %}",
+    "{% elif r == 'min_closed_time' %}## Waiting",
+    "",
+    "The valve stays closed a few more minutes before it may open again.",
+    ...t4Safety(w),
+    "{% elif r == 'room_sensor_unavailable' %}## Waiting for the room sensor",
+    "",
+    // SmartHeat 0.3.1: a silent sensor may still show its last value
+    "{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'There is no reading from the room sensor right now.' }} The valve keeps its position for a while.",
+    "{% elif r == 'room_sensor_lost' %}## Room sensor lost",
+    "",
+    // SmartHeat 0.3.1: an underfloor zone keeps heating by the last day's average, or keeps the
+    // valve closed if it was hardly open over the last day. A silent sensor may still show its
+    // last value.
+    `{% if state_attr(e, 'fallback') == 'room_sensor' %}The room sensor {{ 'has stopped reporting (it may still show its last value)' if state_attr(e, 'room_silent') else 'has had no reading for too long' }}, so SmartHeat {% if ${HOLD_SHUT} %}follows the last day's average. The valve was hardly open over the last day, so it stays closed until the sensor is back.{% else %}keeps heating by the last day's average{{ (': the valve opens **' ~ (fd | round(0)) ~ ' %** of every ${HOLD_INTERVAL_MIN} minutes') if fd is number else '' }}.{% endif %} Check the sensor's battery and connection.{% else %}No reading for too long, so the valve is closed for safety. Check the sensor's battery and connection.{% endif %}`,
+    ...T4_END,
+  ];
+  lines.push(...t4Water(z));
   if (z.roles.learning_cycles) {
     lines.push(
       `{%- set cy = states(${jstr(z.roles.learning_cycles)}) -%}`,
@@ -522,8 +626,109 @@ function T4(z) {
   return lines.join("\n");
 }
 
+// T4 of a tickle zone (SmartHeat 0.4.0). A pulse may start at each pulse time and lasts until
+// the return water reaches the return target (return_threshold, null while not used).
+// next_pulse is the next pulse time in UTC, shown in local time. Without a sensor SmartHeat
+// keeps pulsing on the same grid (fallback), opening the valve fallback_duty percent of every
+// pulse interval; at 0 % it stays closed.
+function T4Tickle(z) {
+  const w = SYSTEM[z.system];
+  const lines = [
+    `{%- set e = ${jstr(z.climate)} -%}`,
+    "{%- set s = states(e) -%}",
+    "{%- set r = state_attr(e, 'reason') -%}",
+    "{%- set rt = state_attr(e, 'return_temperature') -%}",
+    "{%- set mr = state_attr(e, 'max_return_temp') -%}",
+    "{%- set ft = state_attr(e, 'frost_temp') -%}",
+    "{%- set fb = state_attr(e, 'fallback') -%}",
+    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
+    "{%- set th = state_attr(e, 'return_threshold') -%}",
+    "{%- set tg = ('**' ~ (th | round(1)) ~ ' °C**') if th is number else 'its target' -%}",
+    "{%- set np = as_timestamp(state_attr(e, 'next_pulse'), none) -%}",
+    "{%- set at = (' at ' ~ (np | timestamp_custom('%H:%M'))) if np is number else '' -%}",
+    // A closed valve waits for the next pulse time. Without the room sensor and at 0 % it waits
+    // for a sensor instead: no pulse comes until then. Timed pulses by the room alone set a new
+    // share at each pulse time, so they may open again then.
+    `{%- set until = '' if fb in ['room_sensor', 'sensors'] and ${HOLD_SHUT} else (' until the next pulse' ~ at) -%}`,
+    "{%- set pi = state_attr(e, 'pulse_interval_minutes') -%}",
+    "{%- set pf = state_attr(e, 'pulse_flush_minutes') -%}",
+    "{%- set every = (' of every ' ~ (pi | round(0)) ~ ' minutes') if pi is number else ' of each interval' -%}",
+    ...T4_START,
+    "{% elif r == 'pulse_flush' %}## Pulse: filling the loop",
+    "",
+    // Without the room sensor the last day's share may end a pulse sooner
+    "The valve is open{{ (' for at least ' ~ (pf | round(0)) ~ ' minutes') if pf is number and fb != 'room_sensor' else '' }}, so hot water reaches the end of the loop.",
+    "{% elif r == 'pulse' %}## Pulse: heating",
+    "",
+    "The valve stays open until the return water reaches {{ tg }}{% if fb == 'room_sensor' %}, but no longer than the last day's share of this interval{% endif %}.",
+    "{% elif r == 'pulse_extended' %}## Pulse extended",
+    "",
+    "The return water is still below {{ tg }}, so the pulse goes on into the next interval.",
+    "{% elif r == 'return_reached' %}## Return target reached",
+    "",
+    "The return water reached {{ tg }}, so the valve is closed{{ until }}.",
+    "{% elif r == 'pulse_skipped' %}## Pulse skipped",
+    "",
+    "The room was warm enough, so the valve stays closed{{ until }}.",
+    "{% elif r == 'waiting' %}## Waiting",
+    "",
+    "The valve is closed{{ until }}.",
+    "{% elif r == 'timed_pulse' %}## Timed pulses",
+    "",
+    "The valve is open for a set time.",
+    ...t4Safety(w),
+    // A missing reading counts as lost after a minute or two
+    "{% elif r == 'return_sensor_unavailable' %}## Waiting for the return sensor",
+    "",
+    "There is no reading from the return sensor right now. The valve keeps its position for a minute or two.",
+    "{% elif r == 'room_sensor_unavailable' %}## Waiting for the room sensor",
+    "",
+    "{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'There is no reading from the room sensor right now.' }} The valve keeps its position for a minute or two.",
+    ...T4_END,
+    // How SmartHeat keeps heating without a sensor, whatever the valve does now. A return
+    // sensor that still has a reading did not respond to a pulse.
+    "{% if fb in ['room_sensor', 'return_sensor', 'sensors'] %}",
+    "> [!WARNING]",
+    `> {% if fb == 'room_sensor' %}{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'The room sensor has no reading.' }} {% if ${HOLD_SHUT} %}The valve was hardly open over the last day, so it stays closed until the sensor is back.{% else %}SmartHeat pulses on the return temperature alone{{ (', and opens the valve at most **' ~ (fd | round(0)) ~ ' %**' ~ every) if fd is number else '' }}.{% endif %} Check the sensor's battery and connection.`
+      + `{% elif fb == 'return_sensor' %}{{ 'The return temperature does not change when the valve opens.' if rt is number else 'The return sensor has no reading.' }} SmartHeat opens the valve for a set time instead{% if ${HOLD_SHUT} %}; for now it stays closed{% elif fd is number %}: **{{ fd | round(0) }} %**{{ every }}, set by the room temperature{% endif %}. {% if rt is number %}Check the return sensor and that hot water reaches the loop.{% else %}Check the sensor's battery and connection.{% endif %}`
+      + `{% else %}Both the room and the return sensor are lost, so SmartHeat {% if ${HOLD_SHUT} %}follows the last day's average. The valve was hardly open over the last day, so it stays closed until a sensor is back.{% else %}heats by the last day's average{{ (': the valve opens **' ~ (fd | round(0)) ~ ' %**' ~ every) if fd is number else '' }}.{% endif %} Check the sensors' batteries and connections.{% endif %}`,
+    "",
+    "{% endif %}",
+  ];
+  lines.push(...t4Water(z));
+  return lines.join("\n");
+}
+
+// T5 rows both control methods share
+const T5_DEG = "{%- macro deg(v, p) -%}{{ (v | round(p) ~ ' °C') if v is number else '–' }}{%- endmacro -%}";
+const T5_TOP = [
+  "| Decision | {{ labels.get(r, r) if ok and r else '–' }} |",
+  "|:--|--:|",
+  "| Valve | {{ ('Open' if is_state_attr(e, 'hvac_action', 'heating') else 'Closed') if ok else '–' }} |",
+  "| Target now | {{ deg(state_attr(e, 'temperature'), 1) }} |",
+  "| Comfort target | {{ deg(state_attr(e, 'comfort_temperature'), 1) }} |",
+];
+// SmartHeat 0.3.1 underfloor zones: whether the room sensor counts as silent. An unavailable
+// sensor is not silent, but it has no reading. A reading says nothing about reports: with the
+// check off, or for a helper sensor, SmartHeat never counts the sensor as silent.
+const T5_ROOM_SENSOR = "| Room sensor | {{ ('Silent' if state_attr(e, 'room_silent') else 'Has a reading' if state_attr(e, 'current_temperature') is number else 'No reading') if ok else '–' }} |";
+const T5_REASON = ["{%- if ok and r %}", "", "Reason code: `{{ r }}`", "{%- endif %}"];
+
+// Supply − return and Loop saturated need both sensors
+function t5Supply(z) {
+  const rows = [];
+  if (z.hasSupply) {
+    rows.push("| Supply water | {{ deg(state_attr(e, 'supply_temperature'), 1) }} |");
+    if (z.hasReturn) rows.push("| Supply − return | {{ deg(state_attr(e, 'supply_return_delta'), 1) }} |");
+    rows.push("| Hot water arriving | {{ ('No' if state_attr(e, 'no_heat_source') else 'Yes') if ok else '–' }} |");
+    if (z.hasReturn) rows.push("| Loop saturated | {{ ('Yes' if state_attr(e, 'loop_saturated') else 'No') if ok else '–' }} |");
+  }
+  return rows;
+}
+
 // T5: the controller table
 function T5(z) {
+  if (z.tickle) return T5Tickle(z);
   const rows = [
     `{%- set e = ${jstr(z.climate)} -%}`,
     "{%- set ok = states(e) not in ['unavailable', 'unknown'] -%}",
@@ -533,38 +738,58 @@ function T5(z) {
     "{%- set fd = state_attr(e, 'fallback_duty') -%}",
     `{%- set lost = 'Room sensor lost: heating by average' if state_attr(e, 'fallback') == 'room_sensor' and not ${HOLD_SHUT} else 'Room sensor lost' -%}`,
     "{%- set labels = {'heating': 'Heating', 'idle': 'Warm enough', 'predictive_close': 'Closing early', 'coasting': 'Coasting', 'min_open_time': 'Minimum open time', 'min_closed_time': 'Minimum closed time', 'off': 'Zone off', 'window_open': 'Window open', 'max_return_temp': 'Water too hot', 'room_sensor_unavailable': 'Waiting for room sensor', 'room_sensor_lost': lost, 'frost_protection': 'Frost protection'} -%}",
-    "{%- macro deg(v, p) -%}{{ (v | round(p) ~ ' °C') if v is number else '–' }}{%- endmacro -%}",
-    "| Decision | {{ labels.get(r, r) if ok and r else '–' }} |",
-    "|:--|--:|",
-    "| Valve | {{ ('Open' if is_state_attr(e, 'hvac_action', 'heating') else 'Closed') if ok else '–' }} |",
-    "| Target now | {{ deg(state_attr(e, 'temperature'), 1) }} |",
-    "| Comfort target | {{ deg(state_attr(e, 'comfort_temperature'), 1) }} |",
+    T5_DEG,
+    ...T5_TOP,
     "| Predicted overshoot | {{ deg(state_attr(e, 'predicted_overshoot'), 2) }} |",
     "| Valve closes at | {{ deg(state_attr(e, 'close_threshold'), 2) }} |",
     "| Coasting | {{ ('Yes' if state_attr(e, 'coasting') else 'No') if ok else '–' }} |",
   ];
-  // SmartHeat 0.3.1 underfloor zones: whether the room sensor counts as silent. An unavailable
-  // sensor is not silent, but it has no reading. A reading says nothing about reports: with
-  // the check off, or for a helper sensor, SmartHeat never counts the sensor as silent.
-  if (z.hasRoomSilent) rows.push("| Room sensor | {{ ('Silent' if state_attr(e, 'room_silent') else 'Has a reading' if state_attr(e, 'current_temperature') is number else 'No reading') if ok else '–' }} |");
+  if (z.hasRoomSilent) rows.push(T5_ROOM_SENSOR);
   if (z.hasReturn) rows.push("| Return water | {{ deg(state_attr(e, 'return_temperature'), 1) }} |");
-  // Supply − return and Loop saturated need both sensors
-  if (z.hasSupply) {
-    rows.push("| Supply water | {{ deg(state_attr(e, 'supply_temperature'), 1) }} |");
-    if (z.hasReturn) rows.push("| Supply − return | {{ deg(state_attr(e, 'supply_return_delta'), 1) }} |");
-    rows.push("| Hot water arriving | {{ ('No' if state_attr(e, 'no_heat_source') else 'Yes') if ok else '–' }} |");
-    if (z.hasReturn) rows.push("| Loop saturated | {{ ('Yes' if state_attr(e, 'loop_saturated') else 'No') if ok else '–' }} |");
-  }
   rows.push(
+    ...t5Supply(z),
     "{%- set tr = state_attr(e, 'trained') -%}",
     "{%- if ok and tr is not none %}",
     "| Prediction | {{ 'Learned model' if tr else 'Average of past cycles' }} |",
     "{%- endif %}",
-    "{%- if ok and r %}",
-    "",
-    "Reason code: `{{ r }}`",
-    "{%- endif %}",
+    ...T5_REASON,
   );
+  return rows.join("\n");
+}
+
+// T5 of a tickle zone (SmartHeat 0.4.0): the pulses, the return target and its calibration
+// instead of the overshoot prediction. The return offset has no attribute, so its row reads the
+// diagnostic sensor. The outdoor temperature in use may be a held value.
+function T5Tickle(z) {
+  const rows = [
+    `{%- set e = ${jstr(z.climate)} -%}`,
+    "{%- set ok = states(e) not in ['unavailable', 'unknown'] -%}",
+    "{%- set r = state_attr(e, 'reason') -%}",
+    "{%- set fb = state_attr(e, 'fallback') -%}",
+    // Without the room sensor and at 0 %, no pulse comes until a sensor is back (see T4Tickle)
+    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
+    `{%- set shut = fb in ['room_sensor', 'sensors'] and ${HOLD_SHUT} -%}`,
+    "{%- set waiting = 'Waiting for a sensor' if shut else 'Waiting for the next pulse' -%}",
+    "{%- set np = as_timestamp(state_attr(e, 'next_pulse'), none) -%}",
+    "{%- set labels = {'pulse_flush': 'Pulse: filling the loop', 'pulse': 'Pulse: heating', 'pulse_extended': 'Pulse extended', 'return_reached': 'Return target reached', 'pulse_skipped': 'Pulse skipped: warm enough', 'waiting': waiting, 'timed_pulse': 'Timed pulse', 'off': 'Zone off', 'window_open': 'Window open', 'max_return_temp': 'Water too hot', 'return_sensor_unavailable': 'Waiting for return sensor', 'room_sensor_unavailable': 'Waiting for room sensor', 'frost_protection': 'Frost protection'} -%}",
+  ];
+  if (z.roles.return_offset) rows.push(`{%- set ro = states(${jstr(z.roles.return_offset)}) -%}`);
+  rows.push(
+    T5_DEG,
+    ...T5_TOP,
+    "| Control method | {{ {'thermostat': 'Thermostat', 'tickle': 'Tickle pulses'}.get(state_attr(e, 'strategy'), '–') if ok else '–' }} |",
+    "| Return target | {{ deg(state_attr(e, 'return_threshold'), 2) }} |",
+  );
+  if (z.hasReturn) rows.push("| Return water | {{ deg(state_attr(e, 'return_temperature'), 1) }} |");
+  if (z.roles.return_offset) rows.push("| Return offset | {{ ((ro | float) | round(2) ~ ' °C') if ok and ro | is_number else '–' }} |");
+  if (z.hasOutside) rows.push("| Outdoor | {{ deg(state_attr(e, 'outside_temperature'), 1) }} |");
+  rows.push(
+    "| Next pulse | {{ (np | timestamp_custom('%H:%M')) if ok and np is number and not shut else '–' }} |",
+    "| Calibrating | {{ ('Yes' if state_attr(e, 'calibrating') else 'No') if ok else '–' }} |",
+    "| Fallback | {{ ({'room_sensor': 'Room sensor lost', 'return_sensor': 'Return sensor lost', 'sensors': 'Room and return sensors lost'}.get(fb, fb) if fb else 'No') if ok else '–' }} |",
+  );
+  if (z.hasRoomSilent) rows.push(T5_ROOM_SENSOR);
+  rows.push(...t5Supply(z), ...T5_REASON);
   return rows.join("\n");
 }
 
@@ -585,6 +810,14 @@ const S1 = [
 
 // S2: the note under the learned values
 const S2 = "*Overshoot* is how far the room keeps warming after the valve closes. SmartHeat learns it from every heating cycle and closes the valve that much early. *Last peak vs target* shows how the last cycle landed: close to 0 °C is good.";
+
+// S3: the note under the learned values of a tickle zone (SmartHeat 0.4.0). Without an outdoor
+// temperature the return target has no outdoor part. The thermostat's values stay registered,
+// but the pulses do not change them.
+function S3(z) {
+  const corrections = z.hasOutside ? "the outdoor temperature and for how far the room is from its target" : "how far the room is from its target";
+  return `*Return target* is how warm the return water may get before a pulse ends: the room's target plus the *return offset*, corrected for ${corrections}. SmartHeat adjusts the offset slowly, so the room settles on its target. What the thermostat learned, such as the overshoot, stays as it is while the zone pulses.`;
+}
 
 // ------------------------------------------------------------------ cards
 
@@ -707,7 +940,7 @@ function overviewView(S, ctx) {
   // card hidden that way is removed from the page and never comes back.
   const sections = [{
     type: "grid", column_span: 3,
-    visibility: [{ condition: "template", value_template: T2a(known) }],
+    visibility: [{ condition: "template", value_template: T2a(zones) }],
     cards: [{
       type: "markdown", text_only: true, content: T2b(zones),
       tap_action: navigate(P_ROOMS), grid_options: { columns: "full" },
@@ -763,7 +996,7 @@ function overviewView(S, ctx) {
     type: "sections", title: "Heating", path: P_OVERVIEW, icon: "mdi:radiator", max_columns: 3,
     header: { layout: "responsive", badges_position: "bottom", badges_wrap: "wrap" },
   };
-  if (zones.length) view.header.card = { type: "markdown", text_only: true, content: T3(known) };
+  if (zones.length) view.header.card = { type: "markdown", text_only: true, content: T3(known, knowsMethods(zones)) };
   if (ctx.weather) view.badges = [weatherBadge(ctx.weather)];
   view.sections = sections;
   return view;
@@ -814,6 +1047,14 @@ function zoneView(S, z, ctx) {
   if (z.room) inputs.push({ entity: z.room, name: "Room temperature", icon: "mdi:home-thermometer", secondary_info: "last_updated" });
   if (z.ret) inputs.push({ entity: z.ret, name: "Return water", icon: "mdi:thermometer-water" });
   if (z.supply) inputs.push({ entity: z.supply, name: "Supply water", icon: "mdi:water-thermometer" });
+  // SmartHeat 0.4.0 tickle zones: the outdoor temperature in the return target. A weather
+  // entity's state is the condition, so its row shows the temperature attribute, in the weather
+  // entity's own unit.
+  if (z.tickle && z.outside) {
+    inputs.push(z.outside.startsWith("weather.")
+      ? { type: "attribute", entity: z.outside, attribute: "temperature", name: "Outdoor temperature", icon: "mdi:weather-partly-cloudy" }
+      : { entity: z.outside, name: "Outdoor temperature", icon: "mdi:thermometer" });
+  }
   if (z.window) inputs.push({ entity: z.window, name: windowLabel(S, z.window), secondary_info: "last_changed" });
   if (inputs.length) {
     sections.push({
@@ -823,11 +1064,14 @@ function zoneView(S, z, ctx) {
   }
 
   // Z5 water temperatures (SmartHeat 0.2.0): whichever water sensors are usable, as a radiator
-  // zone may have no return sensor and a configured one may be deleted or disabled
-  if (z.ret || z.supply) {
+  // zone may have no return sensor and a configured one may be deleted or disabled. A tickle
+  // zone (SmartHeat 0.4.0) adds its return target, so each pulse can be seen ending there.
+  const target = z.tickle ? z.roles.return_target : null;
+  if (z.ret || target || z.supply) {
     const water = [];
     if (z.valve) water.push({ entity: z.valve, name: valveLabel(z) });
     if (z.ret) water.push({ entity: z.ret, name: "Return" });
+    if (target) water.push({ entity: target, name: "Return target" });
     if (z.supply) water.push({ entity: z.supply, name: "Supply" });
     sections.push({
       type: "grid", column_span: 1,
@@ -846,20 +1090,23 @@ function zoneView(S, z, ctx) {
       cards: [
         heading("What SmartHeat has learned", "mdi:school", "subtitle"),
         { type: "entities", entities: learned, grid_options: { columns: "full" } },
-        { type: "markdown", text_only: true, content: S2, grid_options: { columns: "full" } },
+        { type: "markdown", text_only: true, content: z.tickle ? S3(z) : S2, grid_options: { columns: "full" } },
       ],
     });
   }
 
-  // Z7 overshoot learning
-  const overshoot = [["last_peak_error", "Last peak vs target"], ["learned_overshoot", "Learned overshoot"]]
-    .filter(([role]) => z.roles[role]).map(([role, name]) => ({ entity: z.roles[role], name }));
-  if (overshoot.length) {
+  // Z7 overshoot learning. The pulses of a tickle zone (SmartHeat 0.4.0) learn the return
+  // offset instead.
+  const learning = z.tickle
+    ? [["return_offset", "Return offset"]]
+    : [["last_peak_error", "Last peak vs target"], ["learned_overshoot", "Learned overshoot"]];
+  const series = learning.filter(([role]) => z.roles[role]).map(([role, name]) => ({ entity: z.roles[role], name }));
+  if (series.length) {
     sections.push({
       type: "grid", column_span: 2,
       cards: [
-        heading("Overshoot learning, last 14 days", "mdi:chart-timeline-variant", "subtitle"),
-        { type: "history-graph", hours_to_show: 336, entities: overshoot, grid_options: { columns: "full" } },
+        heading(z.tickle ? "Return offset, last 14 days" : "Overshoot learning, last 14 days", "mdi:chart-timeline-variant", "subtitle"),
+        { type: "history-graph", hours_to_show: 336, entities: series, grid_options: { columns: "full" } },
       ],
     });
   }
@@ -895,12 +1142,16 @@ function zoneView(S, z, ctx) {
   }
 
   // Z10 settings. A button row, because the perform-action row has no target; hold_action
-  // none, because the default more-info has no entity here.
+  // none, because the default more-info has no entity here. In a tickle zone (SmartHeat 0.4.0)
+  // the reset only starts the return offset again, from what the thermostat learned.
+  const reset = z.tickle
+    ? `Reset the return offset of ${z.name}? It starts again from what the thermostat learned. The thermostat's learning is kept.`
+    : `Forget what SmartHeat has learned about ${z.name}? It starts again from the defaults.`;
   const rows = [{
     type: "button", name: "Reset learning", icon: "mdi:restore", action_name: "Reset",
     tap_action: {
       action: "perform-action", perform_action: "smartheat.reset_learning", target: { entity_id: z.climate },
-      confirmation: { text: `Forget what SmartHeat has learned about ${z.name}? It starts again from the defaults.` },
+      confirmation: { text: reset },
     },
     hold_action: { action: "none" },
   }, {
