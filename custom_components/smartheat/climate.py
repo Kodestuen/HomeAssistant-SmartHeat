@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from functools import partial
 import logging
 import math
 from typing import Any
@@ -37,7 +38,7 @@ from homeassistant.core import (
     split_entity_id,
 )
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_platform
+from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import (
@@ -49,7 +50,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from . import SmartHeatConfigEntry, zone_config
+from . import SmartHeatConfigEntry, learning_data, zone_config
 from .const import (
     ATTR_RETURN_SENSOR_ENTITY_ID,
     ATTR_ROOM_SENSOR_ENTITY_ID,
@@ -70,6 +71,7 @@ from .const import (
     CONF_MIN_TEMP,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
+    CONF_ROOM_SILENT,
     CONF_SENSOR_TIMEOUT,
     CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
@@ -78,6 +80,7 @@ from .const import (
     DEFAULT_TARGET,
     PRESET_FROST,
     SIGNAL_UPDATE,
+    SYSTEM_UNDERFLOOR,
 )
 from .controller import Inputs
 from .entity import SmartHeatEntity
@@ -88,6 +91,7 @@ SERVICE_RESET_LEARNING = "reset_learning"
 UPDATE_INTERVAL = timedelta(minutes=1)
 COMMAND_RETRY_S = 60.0  # resend a command the valve hasn't followed after this long
 SAVE_DELAY_S = 10.0
+CALIBRATION_SAVE_S = 1800.0  # a calibration that changed alone is saved this seldom
 ATTR_COMFORT_TEMPERATURE = "comfort_temperature"
 VALVE_STATES = {"open": True, "opening": True, "closed": False, "closing": False}
 # Tuning options that are also attributes, under their option keys
@@ -101,6 +105,21 @@ TUNING_ATTRIBUTES = (
     CONF_ECO_TEMP,
     CONF_AWAY_TEMP,
     CONF_FROST_TEMP,
+)
+# The same, for the options only underfloor zones have
+UNDERFLOOR_TUNING_ATTRIBUTES = (CONF_ROOM_SILENT,)
+# Helpers that may write their state only when one of their sources changes, so a
+# steady room temperature from them would look like a silent sensor
+SILENT_HELPER_PLATFORMS = frozenset(
+    {
+        "template",
+        "min_max",
+        "filter",
+        "statistics",
+        "group",
+        "derivative",
+        "compensation",
+    }
 )
 
 
@@ -147,6 +166,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             ATTR_WINDOW_SENSOR_ENTITY_ID,
             CONF_INVERT_VALVE,
             *TUNING_ATTRIBUTES,
+            *UNDERFLOOR_TUNING_ATTRIBUTES,
         }
     )
 
@@ -154,6 +174,10 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         super().__init__(entry, "climate")
         config = zone_config(entry)
         self._store = entry.runtime_data.store
+        self._underfloor = config[CONF_SYSTEM_TYPE] == SYSTEM_UNDERFLOOR
+        tuning = TUNING_ATTRIBUTES
+        if self._underfloor:
+            tuning += UNDERFLOOR_TUNING_ATTRIBUTES
         self._valve: str = config[CONF_VALVE]
         self._room_sensor: str = config[CONF_ROOM_SENSOR]
         self._return_sensor: str | None = config.get(CONF_RETURN_SENSOR)
@@ -176,7 +200,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             ATTR_SUPPLY_SENSOR_ENTITY_ID: self._supply_sensor or None,
             ATTR_WINDOW_SENSOR_ENTITY_ID: self._window_sensor or None,
             CONF_INVERT_VALVE: self._invert,
-            **{key: config[key] for key in TUNING_ATTRIBUTES},
+            **{key: config[key] for key in tuning},
         }
         self._attr_hvac_mode = HVACMode.HEAT
         self._attr_preset_mode = PRESET_NONE
@@ -184,9 +208,12 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         self._room: float | None = None
         self._return: float | None = None
         self._supply: float | None = None
+        # Whether the room sensor's reports are checked; known once the entity is added
+        self._watch_room_reports = False
         self._lock = asyncio.Lock()
         self._last_command: tuple[bool, float] | None = None
-        self._saved_revision = self._controller.model.revision
+        self._saved_revisions = self._learning_revisions()
+        self._saved_at: float | None = None
         self._removed = False
 
     @property
@@ -215,9 +242,13 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         """Explain what the controller is doing, and show how the zone is set up."""
         controller = self._controller
         decision = controller.last_decision
+        share = decision.fallback_share if decision else None
         attributes: dict[str, Any] = {
             ATTR_COMFORT_TEMPERATURE: self._comfort_temperature,
             "reason": decision.reason if decision else None,
+            # The lost sensor the valve works around, and the share of time it opens
+            "fallback": decision.fallback if decision else None,
+            "fallback_duty": None if share is None else round(100 * share),
             "predicted_overshoot": _round(
                 decision.predicted_overshoot if decision else None
             ),
@@ -227,6 +258,8 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             "coasting": controller.coasting,
             "return_temperature": self._return,
         }
+        if self._underfloor:
+            attributes["room_silent"] = controller.room_silent
         if self._supply_sensor:
             attributes["supply_temperature"] = self._supply
             attributes["no_heat_source"] = controller.no_heat_source
@@ -242,6 +275,16 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         await super().async_added_to_hass()
         if (last_state := await self.async_get_last_state()) is not None:
             self._restore(last_state)
+        # An underfloor zone checks that its room sensor still reports. Not checked:
+        # helpers, which may stay silent while the temperature is steady, and entities
+        # without a registry entry, such as states set through the API or YAML sensors
+        # without a unique ID
+        room = er.async_get(self.hass).async_get(self._room_sensor)
+        self._watch_room_reports = (
+            self._underfloor
+            and room is not None
+            and room.platform not in SILENT_HELPER_PLATFORMS
+        )
 
         watched = [
             entity_id
@@ -299,7 +342,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         await self._async_control()
 
     async def async_reset_learning(self) -> None:
-        """Forget what has been learned about this zone."""
+        """Forget the overshoot learned for this zone; the valve's open share stays."""
         self._controller.reset_learning()
         await self._async_control()
 
@@ -326,7 +369,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
                 and decision.valve_open != inputs.valve_open
             ):
                 await self._async_command_valve(decision.valve_open, now)
-            self._save_learning()
+            self._save_learning(now)
         if self._removed:
             return
         self.async_write_ha_state()
@@ -347,7 +390,19 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             window_open=bool(window) and window.state == STATE_ON,
             valve_open=valve_open,
             valve_changed_at=valve_changed_at,
+            room_updated_at=self._room_reported_at(),
         )
+
+    def _room_reported_at(self) -> float | None:
+        """Return when the room sensor last reported, if its reports are watched."""
+        if not self._watch_room_reports:
+            return None
+        if (state := self.hass.states.get(self._room_sensor)) is None:
+            return None
+        # Unlike last_changed, this also moves when the same value is written again.
+        # Some integrations, MQTT and deCONZ among them, write a reading only when it
+        # changes, so for their sensors it is the time of the last change.
+        return state.last_reported.timestamp()
 
     def _temperature(self, entity_id: str | None) -> float | None:
         """Return a sensor's temperature in °C, or None if it has none."""
@@ -397,8 +452,27 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
                 "%s could not %s %s: %s", self.entity_id, service, self._valve, err
             )
 
-    def _save_learning(self) -> None:
-        model = self._controller.model
-        if model.revision != self._saved_revision:
-            self._saved_revision = model.revision
-            self._store.async_delay_save(model.to_dict, SAVE_DELAY_S)
+    def _learning_revisions(self) -> tuple[int, int | None]:
+        calibration = self._controller.calibration
+        return (
+            self._controller.model.revision,
+            None if calibration is None else calibration.revision,
+        )
+
+    def _save_learning(self, now: float) -> None:
+        """Save soon after the model learns; a calibration change alone can wait."""
+        revisions = self._learning_revisions()
+        if revisions == self._saved_revisions:
+            return
+        if (
+            revisions[0] == self._saved_revisions[0]
+            and self._saved_at is not None
+            and 0 <= now - self._saved_at < CALIBRATION_SAVE_S
+        ):
+            # The store restarts its delay on every call, so wait here instead
+            return
+        self._saved_revisions = revisions
+        self._saved_at = now
+        self._store.async_delay_save(
+            partial(learning_data, self._controller), SAVE_DELAY_S
+        )

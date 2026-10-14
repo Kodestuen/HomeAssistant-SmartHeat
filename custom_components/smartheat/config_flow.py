@@ -31,6 +31,7 @@ from .const import (
     CONF_MIN_TEMP,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
+    CONF_ROOM_SILENT,
     CONF_SENSOR_TIMEOUT,
     CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
@@ -91,23 +92,32 @@ USER_SCHEMA = vol.Schema(
 
 CELSIUS = UnitOfTemperature.CELSIUS
 MINUTES = UnitOfTime.MINUTES
-OPTIONS_SCHEMA = vol.Schema(
-    {
-        **ENTITIES_SCHEMA,
-        vol.Required(CONF_INVERT_VALVE): selector.BooleanSelector(),
-        vol.Required(CONF_MIN_TEMP): _number(5, 30, 0.5, CELSIUS),
-        vol.Required(CONF_MAX_TEMP): _number(10, 35, 0.5, CELSIUS),
-        vol.Required(CONF_ECO_TEMP): _number(5, 30, 0.5, CELSIUS),
-        vol.Required(CONF_AWAY_TEMP): _number(5, 30, 0.5, CELSIUS),
-        vol.Required(CONF_FROST_TEMP): _number(0, 15, 0.5, CELSIUS),
-        vol.Required(CONF_HYSTERESIS): _number(0.1, 2, 0.1, CELSIUS),
-        vol.Required(CONF_MIN_OPEN): _number(0, 120, 1, MINUTES),
-        vol.Required(CONF_MIN_CLOSED): _number(0, 120, 1, MINUTES),
-        vol.Required(CONF_COAST_WINDOW): _number(10, 720, 5, MINUTES),
-        vol.Required(CONF_MAX_RETURN): _number(20, 90, 1, CELSIUS),
-        vol.Required(CONF_SENSOR_TIMEOUT): _number(5, 240, 1, MINUTES),
-    }
-)
+HOURS = UnitOfTime.HOURS
+OPTIONS = {
+    **ENTITIES_SCHEMA,
+    vol.Required(CONF_INVERT_VALVE): selector.BooleanSelector(),
+    vol.Required(CONF_MIN_TEMP): _number(5, 30, 0.5, CELSIUS),
+    vol.Required(CONF_MAX_TEMP): _number(10, 35, 0.5, CELSIUS),
+    vol.Required(CONF_ECO_TEMP): _number(5, 30, 0.5, CELSIUS),
+    vol.Required(CONF_AWAY_TEMP): _number(5, 30, 0.5, CELSIUS),
+    vol.Required(CONF_FROST_TEMP): _number(0, 15, 0.5, CELSIUS),
+    vol.Required(CONF_HYSTERESIS): _number(0.1, 2, 0.1, CELSIUS),
+    vol.Required(CONF_MIN_OPEN): _number(0, 120, 1, MINUTES),
+    vol.Required(CONF_MIN_CLOSED): _number(0, 120, 1, MINUTES),
+    vol.Required(CONF_COAST_WINDOW): _number(10, 720, 5, MINUTES),
+    vol.Required(CONF_MAX_RETURN): _number(20, 90, 1, CELSIUS),
+    vol.Required(CONF_SENSOR_TIMEOUT): _number(5, 240, 1, MINUTES),
+}
+UNDERFLOOR_OPTIONS = {
+    vol.Required(CONF_ROOM_SILENT): _number(0, 48, 1, HOURS),
+}
+
+
+def options_schema(system_type: str) -> vol.Schema:
+    """Return the settings form for a zone of this system type."""
+    if system_type == SYSTEM_UNDERFLOOR:
+        return vol.Schema({**OPTIONS, **UNDERFLOOR_OPTIONS})
+    return vol.Schema(OPTIONS)
 
 
 def _validate(data: dict[str, Any], system_type: str) -> dict[str, str]:
@@ -167,15 +177,16 @@ class SmartHeatOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Show all settings, prefilled with the current values."""
         errors: dict[str, str] = {}
+        system_type = self.config_entry.data[CONF_SYSTEM_TYPE]
         if user_input is not None:
             self._async_abort_entries_match({CONF_VALVE: user_input[CONF_VALVE]})
-            system_type = self.config_entry.data[CONF_SYSTEM_TYPE]
             if not (errors := _validate(user_input, system_type)):
                 return self.async_create_entry(data=user_input)
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(
-                OPTIONS_SCHEMA, user_input or zone_config(self.config_entry)
+                options_schema(system_type),
+                user_input or zone_config(self.config_entry),
             ),
             errors=errors,
         )

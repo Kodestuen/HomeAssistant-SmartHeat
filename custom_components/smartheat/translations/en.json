@@ -53,7 +53,8 @@
           "min_closed_minutes": "Minimum closed time",
           "coast_window_minutes": "Coast window",
           "max_return_temp": "Maximum return temperature",
-          "sensor_timeout_minutes": "Room sensor timeout"
+          "sensor_timeout_minutes": "Room sensor timeout",
+          "room_sensor_silent_hours": "Room sensor silent after"
         },
         "data_description": {
           "return_sensor": "Needed for underfloor heating, optional for radiators.",
@@ -63,7 +64,8 @@
           "min_open_minutes": "Thermal actuators need a few minutes to open fully.",
           "coast_window_minutes": "How long to wait for the room to peak after an early close.",
           "max_return_temp": "The valve closes above this, for example to protect the floor. Only used with a return sensor.",
-          "sensor_timeout_minutes": "The valve closes when the room sensor has been unavailable this long."
+          "sensor_timeout_minutes": "When the room sensor has been unavailable this long, an underfloor zone keeps the valve open for the same share of the time as over the last day. A radiator zone closes the valve.",
+          "room_sensor_silent_hours": "After this long without a new reading, the room sensor counts as lost. 0 turns this off. Helpers such as template sensors are not checked. Some integrations, such as MQTT, only send a reading when it changes: raise this for a sensor with coarse steps."
         }
       }
     },
@@ -114,6 +116,22 @@
               "room_sensor_unavailable": "Waiting for room sensor",
               "room_sensor_lost": "Room sensor lost",
               "frost_protection": "Frost protection"
+            }
+          },
+          "fallback": {
+            "name": "Fallback",
+            "state": {
+              "room_sensor": "Without room sensor"
+            }
+          },
+          "fallback_duty": {
+            "name": "Valve open in fallback (%)"
+          },
+          "room_silent": {
+            "name": "Room sensor silent",
+            "state": {
+              "true": "Yes",
+              "false": "No"
             }
           },
           "predicted_overshoot": {
@@ -206,6 +224,9 @@
           "sensor_timeout_minutes": {
             "name": "Room sensor timeout"
           },
+          "room_sensor_silent_hours": {
+            "name": "Room sensor silent after"
+          },
           "eco_temp": {
             "name": "Eco temperature"
           },
@@ -248,7 +269,7 @@
   "services": {
     "reset_learning": {
       "name": "Reset learning",
-      "description": "Forgets what SmartHeat has learned about this zone and starts again from the defaults."
+      "description": "Forgets the overshoot SmartHeat has learned for this zone and starts again from the defaults. How long the valve was open over the last day, used when the room sensor is lost, is kept."
     }
   }
 }

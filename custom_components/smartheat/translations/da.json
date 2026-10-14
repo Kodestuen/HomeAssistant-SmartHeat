@@ -53,7 +53,8 @@
           "min_closed_minutes": "Mindste lukketid",
           "coast_window_minutes": "Efterløbsvindue",
           "max_return_temp": "Højeste returtemperatur",
-          "sensor_timeout_minutes": "Timeout for rumføler"
+          "sensor_timeout_minutes": "Timeout for rumføler",
+          "room_sensor_silent_hours": "Rumføler tavs efter"
         },
         "data_description": {
           "return_sensor": "Nødvendig ved gulvvarme, valgfri ved radiatorer.",
@@ -63,7 +64,8 @@
           "min_open_minutes": "Termiske aktuatorer skal bruge et par minutter på at åbne helt.",
           "coast_window_minutes": "Hvor længe der ventes på, at rummet topper efter en tidlig lukning.",
           "max_return_temp": "Ventilen lukker over denne temperatur, fx for at beskytte gulvet. Bruges kun med en returføler.",
-          "sensor_timeout_minutes": "Ventilen lukker, når rumføleren har været utilgængelig så længe."
+          "sensor_timeout_minutes": "Når rumføleren har været utilgængelig så længe, holder en gulvvarmezone ventilen åben lige så stor en del af tiden som i det seneste døgn. En radiatorzone lukker ventilen.",
+          "room_sensor_silent_hours": "Har rumføleren ikke sendt en ny måling så længe, regnes den for tabt. 0 slår det fra. Hjælpere som skabelonsensorer kontrolleres ikke. Nogle integrationer, fx MQTT, sender kun en måling, når den ændrer sig: hæv tiden for en føler med grove trin."
         }
       }
     },
@@ -114,6 +116,22 @@
               "room_sensor_unavailable": "Venter på rumføler",
               "room_sensor_lost": "Rumføler mistet",
               "frost_protection": "Frostsikring"
+            }
+          },
+          "fallback": {
+            "name": "Nøddrift",
+            "state": {
+              "room_sensor": "Uden rumføler"
+            }
+          },
+          "fallback_duty": {
+            "name": "Ventil åben i nøddrift (%)"
+          },
+          "room_silent": {
+            "name": "Rumføler tavs",
+            "state": {
+              "true": "Ja",
+              "false": "Nej"
             }
           },
           "predicted_overshoot": {
@@ -206,6 +224,9 @@
           "sensor_timeout_minutes": {
             "name": "Timeout for rumføler"
           },
+          "room_sensor_silent_hours": {
+            "name": "Rumføler tavs efter"
+          },
           "eco_temp": {
             "name": "Eco-temperatur"
           },
@@ -248,7 +269,7 @@
   "services": {
     "reset_learning": {
       "name": "Nulstil læring",
-      "description": "Glemmer, hvad SmartHeat har lært om denne zone, og starter forfra fra standardværdierne."
+      "description": "Glemmer det oversving, SmartHeat har lært for denne zone, og starter forfra fra standardværdierne. Hvor længe ventilen var åben i det seneste døgn, som bruges, hvis rumføleren tabes, beholdes."
     }
   }
 }

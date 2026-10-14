@@ -19,6 +19,10 @@ The "Sensors and valve" and "Water temperatures" sections need SmartHeat 0.2.0 o
 
 Since SmartHeat 0.3.0, a radiator zone may have no return sensor. Its page then leaves out everything that needs the return temperature: the return water temperature, the supply-return difference, the loop saturated status, the maximum return temperature setting, and the heat storage factor and holding difference with their charts. Its controller table always shows the prediction as "Average of past cycles", and the water temperatures chart appears only when the zone has a supply sensor.
 
+Since SmartHeat 0.3.1, an underfloor zone keeps heating when its room sensor is lost: its valve opens for the same share of every 45 minutes as it was open, on average, over the last day. The overview then warns "room sensor lost, heating by the last day's average", and the zone page shows that share and the decision "Room sensor lost: heating by average". If the valve was hardly open over the last day, as in mild weather, the share is 0 %: the valve stays closed until the sensor is back, and the overview warns "room sensor lost, valve closed" instead. A radiator zone still closes its valve when its room sensor is lost.
+
+The controller table of an underfloor zone has a Room sensor row: Has a reading, No reading, or Silent when the sensor has not sent a new reading for the "Room sensor silent after (0 = off)" time shown under Current tuning. Helpers such as template sensors, which report only when one of their sources changes, and entities without a unique ID are never counted as silent.
+
 ## Requirements
 
 - Node.js 22 or newer. No npm packages are needed.

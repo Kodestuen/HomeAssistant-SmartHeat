@@ -22,9 +22,15 @@ The control rules:
 2. **Close early** when the room reaches *target − predicted overshoot*.
 3. **Coast**: after an early close, the valve stays closed until the room has peaked, even if the room is still below the opening threshold. The peak is then used for learning.
 4. **Safety first**. These rules override the minimum open and closed times:
-   - The valve closes when the return temperature exceeds the maximum (to protect the floor), when the window is open, when the zone is off, or when the room sensor has been unavailable longer than the timeout.
+   - The valve closes when the return temperature exceeds the maximum (to protect the floor), when the window is open, or when the zone is off.
    - Below the frost protection temperature the valve opens, even when the zone is off. If the room sensor is gone, the return temperature stands in for it (when the zone has a return sensor).
 5. **Minimum open and closed times** protect thermal actuators, which need a few minutes to move.
+6. **Room sensor lost**. When the room sensor becomes unavailable, the valve first stays as it is. Once the sensor has been unavailable for the room sensor timeout (30 min):
+   - An underfloor zone keeps heating by the last day's average. Every 45 minutes it opens the valve for the share of the time the valve was open over the last day, measured while the sensor worked: at 40 %, that is 18 minutes. Each zone opens at its own minutes, so zones don't all ask for heat at once. A floor stores a lot of heat and its room needs about the same heat from one day to the next, so this keeps the room near its usual temperature. Closing the valve instead lets the room cool all the way down: in the [loop simulation](#simulation-results), a day without the room sensor cools the room to 4.8–9.9 °C with the valve closed, while with the hold it stays between 17.6 and 23.5 °C. The safety rules still come first, and openings that start without the room sensor teach the overshoot model nothing.
+   - The time is rounded so that the valve doesn't move for less than 5 minutes: an opening under 2.5 minutes is left out, one under 5 minutes becomes 5 minutes, and if less than 5 minutes would be left closed, the valve stays open. The share is not adjusted to the weather, or to a new target or preset, until the sensor is back.
+   - A radiator zone closes the valve until the sensor is back.
+   - An underfloor zone also counts its room sensor as lost when it hasn't sent a new reading for 6 hours (the setting **Room sensor silent after**; 0 turns it off). Some sensors keep showing their last value after their battery or radio has failed, and the zone would then heat to a reading that no longer changes. The sensor counts as lost from its last reading: with the default settings the room sensor timeout has passed by then, and the zone heats by the average at once. While this check is on, the average also leaves out the time when the last reading is more than an hour old.
+   - Some integrations, for example MQTT (including Zigbee2MQTT) and deCONZ, only update a sensor when its value changes. A sensor with coarse steps in a very steady room can then look silent: raise the setting, or set it to 0, for such a sensor. Not checked are helpers such as template, min/max, filter, statistics, group, derivative and compensation sensors, which may stay silent while the temperature is steady, and entities without a unique ID, such as states set through the API. After a restart of Home Assistant the 6 hours start over, as sensors write their state again then.
 
 ### What is learned
 
@@ -41,7 +47,7 @@ where **β** is how much heat the emitter stores relative to the room. A thick s
 - **h (holding difference)**: right after the valve opens, the room keeps cooling until the emitter just covers the heat loss. The return-minus-room difference at that low point is h. Water is flowing at that moment, so the return sensor reads the emitter and not a cold pipe.
 - **β (heat storage factor)**: learned from the overshoot actually measured after each early close.
 
-Until three cycles have taught β, SmartHeat uses a plain average of the measured overshoot, and without a return sensor it always does. It starts from 0.4 °C for underfloor heating and 0.2 °C for radiators. Learning is skipped for cycles that are disturbed: the target changes, the window opens, the zone is switched off, or there was no hot water.
+Until three cycles have taught β, SmartHeat uses a plain average of the measured overshoot, and without a return sensor it always does. It starts from 0.4 °C for underfloor heating and 0.2 °C for radiators. Learning is skipped for cycles that are disturbed: the target changes, the window opens, the zone is switched off, there was no hot water, or the valve opened while the room sensor was lost.
 
 ### Simulation results
 
@@ -63,6 +69,8 @@ The learned values match the model: β ≈ 2.0 for the floor (the true capacity 
 The trade-off: because the room peaks *at* the target, its average is a little below the target (about 0.2–0.3 °C in the simulation).
 
 To print these numbers yourself, run `python tests/unit/test_simulation.py`.
+
+**Loop simulation.** `tests/unit/test_simulation_loop.py` runs an underfloor zone on a more detailed floor: two loops with a 7-minute transit that pass only part of their heat to the screed, a wax actuator that takes 4 minutes to open, a return sensor on the pipe at the manifold, and a 35 °C supply. With all sensors working, the room stays 0.36–0.37 °C from the target on average during the day. Then the room sensor is lost for 24 hours, in three weather runs. With the valve closed, as in SmartHeat 0.3.0, the room cools to 9.9, 4.8 and 4.8 °C. With the duty hold it stays at 20.2–23.5, 18.4–19.4 and 17.6–20.3 °C. To print these numbers, run `python tests/unit/test_simulation_loop.py`.
 
 ### Radiators without a return sensor
 
@@ -95,6 +103,7 @@ The system type sets the defaults. Every setting can be changed later under the 
 | Coast window (longest wait for the peak) | 240 min | 60 min |
 | Maximum return temperature (with a return sensor) | 45 °C | 75 °C |
 | Room sensor timeout | 30 min | 30 min |
+| Room sensor silent after (0 = off) | 6 h | – |
 | Frost protection | 7 °C | 7 °C |
 | Eco / away preset | 19 / 16 °C | 19 / 16 °C |
 | Inverted valve (normally open actuator) | off | off |
@@ -107,6 +116,8 @@ Each zone is a device with one climate entity. When you add a zone, its device i
 - **Presets:** comfort (`none`), eco, away, frost protection. The `comfort_temperature` attribute holds the comfort target, also while another preset is active.
 - **Attributes:** these explain what the controller is doing.
   - `reason`: why the valve is open or closed right now
+  - `fallback`: `room_sensor` while an underfloor zone follows the last day's average because its room sensor is lost ([rule 6](#how-it-works)), otherwise null. `fallback_duty` is then the share of each 45 minutes that the valve opens, in percent, rounded as in rule 6: 0 means the valve stays closed.
+  - `room_silent` (underfloor zones): true while the room sensor counts as lost because it hasn't sent a new reading for the **Room sensor silent after** time
   - `predicted_overshoot` and `close_threshold`
   - `trained`: true once β and h are learned; the prediction then uses them whenever the return temperature is known, and the plain average otherwise. Always false without a return sensor.
   - `coasting`
@@ -116,7 +127,7 @@ Each zone is a device with one climate entity. When you add a zone, its device i
   - `system_type`: `underfloor` or `radiator`
   - `valve_entity_id`, `room_sensor_entity_id`, `return_sensor_entity_id`, `supply_sensor_entity_id` and `window_sensor_entity_id` (null when the zone has no such sensor)
   - `invert_valve`
-  - the tuning, under the option names: `hysteresis`, `min_open_minutes`, `min_closed_minutes`, `coast_window_minutes`, `max_return_temp`, `sensor_timeout_minutes`, `eco_temp`, `away_temp` and `frost_temp`
+  - the tuning, under the option names: `hysteresis`, `min_open_minutes`, `min_closed_minutes`, `coast_window_minutes`, `max_return_temp`, `sensor_timeout_minutes`, `eco_temp`, `away_temp` and `frost_temp`, plus `room_sensor_silent_hours` for underfloor zones
 
 Each zone also has diagnostic sensors. Graph them to watch the learning:
 
@@ -133,7 +144,7 @@ Each zone also has diagnostic sensors. Graph them to watch the learning:
 
 Removing the supply or return sensor in the settings also removes the sensors that need it. Adding it back brings them back under the same entity IDs, so their history continues.
 
-The service `smartheat.reset_learning` makes a zone forget what it has learned.
+The service `smartheat.reset_learning` makes a zone forget the overshoot it has learned. It keeps the share of the time the valve was open over the last day, which an underfloor zone needs if its room sensor is lost.
 
 ## Heating dashboard
 

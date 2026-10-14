@@ -20,6 +20,10 @@ are learned:
 
 Until enough cycles exist, a flat average of the measured overshoot is used instead.
 
+Besides the overshoot model, a zone keeps a calibration: how much of the time its valve
+is open, averaged over about a day. It lets the zone keep heating when the room sensor
+is lost.
+
 Pure Python (no Home Assistant imports) so it can be unit tested anywhere.
 """
 
@@ -34,6 +38,9 @@ MAX_OVERSHOOT = 1.5  # °C, upper bound for predictions and samples
 BETA_MAX = 20.0  # sanity limit for beta
 MIN_SHAPE = 0.05  # cycles with less excess heat than this can't teach beta
 MIN_HOLDING_DELTA = 0.2  # °C, smaller valley readings are sensor artefacts
+INITIAL_DUTY = 0.4  # open share assumed before the valve has been watched
+DUTY_TAU_S = 86400.0  # time constant of the open share average
+DUTY_REVISION_STEP = 0.01  # the open share must move this much to count as a change
 
 
 def excess_heat(x: float, h: float) -> float:
@@ -168,3 +175,41 @@ class OvershootModel:
             last_overshoot=data.get("last_overshoot"),
             last_peak_error=data.get("last_peak_error"),
         )
+
+
+@dataclass
+class ZoneCalibration:
+    """Slowly measured facts about a zone, kept for when a sensor is lost."""
+
+    duty: float = INITIAL_DUTY  # share of the time the valve is open, 24 h average
+    revision: int = field(default=0, compare=False)  # bumped on every lasting change
+    _revision_duty: float = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._revision_duty = self.duty
+
+    def add_valve_time(self, valve_open: bool, dt: float) -> None:
+        """Count dt seconds of the valve open or closed into the open share."""
+        sample = 1.0 if valve_open else 0.0
+        # A clock step backwards gives a negative time, which counts as none
+        self.duty += (sample - self.duty) * (1 - math.exp(-max(dt, 0.0) / DUTY_TAU_S))
+        # The share moves a little every minute: only a lasting change is worth saving
+        if abs(self.duty - self._revision_duty) >= DUTY_REVISION_STEP:
+            self._revision_duty = self.duty
+            self.revision += 1
+
+    def to_dict(self) -> dict:
+        """Serialise the calibration for storage."""
+        return {"duty": self.duty}
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> ZoneCalibration:
+        """Restore a calibration saved with to_dict; anything unusable starts afresh."""
+        data = data if isinstance(data, dict) else {}
+        try:
+            duty = float(data.get("duty", INITIAL_DUTY))
+        except (TypeError, ValueError):
+            duty = INITIAL_DUTY
+        if not math.isfinite(duty):
+            duty = INITIAL_DUTY
+        return cls(duty=min(max(duty, 0.0), 1.0))

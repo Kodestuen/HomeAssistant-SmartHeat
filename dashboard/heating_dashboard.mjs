@@ -87,7 +87,9 @@ const ROLES = [
   ["supply_return_difference", "Supply-return difference", "mdi:swap-vertical"],
 ];
 
-// Tuning attributes (SmartHeat 0.2.0 exposes the option keys verbatim): name, suffix, icon
+// Tuning attributes (SmartHeat 0.2.0 exposes the option keys verbatim): name, suffix, icon.
+// SmartHeat 0.3.1 adds room_sensor_silent_hours to underfloor zones, where 0 turns the check
+// off. The row can only show "0 h", so its name says what 0 means.
 const TUNING = [
   ["hysteresis", "Hysteresis", "°C", "mdi:arrow-up-down"],
   ["min_open_minutes", "Minimum open time", "min", "mdi:valve-open"],
@@ -95,6 +97,7 @@ const TUNING = [
   ["coast_window_minutes", "Coast window", "min", "mdi:timer-sand"],
   ["max_return_temp", "Maximum return temperature", "°C", "mdi:thermometer-alert"],
   ["sensor_timeout_minutes", "Room sensor timeout", "min", "mdi:timer-alert-outline"],
+  ["room_sensor_silent_hours", "Room sensor silent after (0 = off)", "h", "mdi:signal-off"],
   ["eco_temp", "Eco temperature", "°C", "mdi:leaf"],
   ["away_temp", "Away temperature", "°C", "mdi:account-arrow-right"],
   ["frost_temp", "Frost protection temperature", "°C", "mdi:snowflake-thermometer"],
@@ -112,7 +115,7 @@ const MDI_ICONS = new Set([
   "account-arrow-right", "arrow-up-down", "book-open-variant", "brain", "chart-bell-curve",
   "chart-line", "chart-multiline", "chart-timeline-variant", "cog", "counter", "devices",
   "heat-wave", "heating-coil", "home-group", "home-thermometer", "leaf", "pipe-valve", "plus",
-  "radiator", "restore", "scale-balance", "school", "snowflake-thermometer", "sofa",
+  "radiator", "restore", "scale-balance", "school", "signal-off", "snowflake-thermometer", "sofa",
   "swap-vertical", "target", "thermometer", "thermometer-alert", "thermometer-chevron-up",
   "thermometer-lines", "thermometer-water", "timer-alert-outline", "timer-sand", "tune", "valve",
   "valve-closed", "valve-open", "water-thermometer", "weather-partly-cloudy",
@@ -287,6 +290,8 @@ function discoverZones(S) {
     // SmartHeat 0.1.0 has no such attribute, and always a return sensor.
     zone.hasReturn = a.return_sensor_entity_id !== null;
     if (!zone.hasReturn) zone.tuning = zone.tuning.filter(([attr]) => attr !== "max_return_temp"); // nothing to limit
+    // SmartHeat 0.3.1 tells whether an underfloor zone's room sensor has gone silent
+    zone.hasRoomSilent = "room_silent" in a;
     zone.area = S.entityById.get(zone.climate)?.area_id ?? device?.area_id ?? (zone.room ? effectiveArea(S, zone.room) : null);
     if (zone.state === "unavailable" || zone.state === "unknown") {
       warnings.push(`Zone "${name}" is ${zone.state}, so its page may lack details. Re-run when the zone responds again.`);
@@ -349,6 +354,13 @@ const jstr = (s) => `'${String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
 const jlist = (ids) => `[${ids.map(jstr).join(", ")}]`;
 const jdict = (pairs) => `{${pairs.map(([k, v]) => `${jstr(k)}: ${jstr(v)}`).join(", ")}}`;
 
+// The duty hold of SmartHeat 0.3.1: an underfloor zone without its room sensor opens the valve
+// for fallback_duty percent of every hold interval. HOLD_SHUT is true, with fd set to that
+// attribute, when the share is 0 %: the valve was hardly open over the last day, so it stays
+// closed.
+const HOLD_INTERVAL_MIN = 45; // controller.HOLD_INTERVAL_S
+const HOLD_SHUT = "(fd is number and fd | round(0) == 0)";
+
 // T1: no SmartHeat zone is running
 const T1 = "{{ states.climate | selectattr('entity_id', 'in', integration_entities('smartheat')) | list | count == 0 }}";
 
@@ -387,7 +399,11 @@ function T3(known) {
     "{%- else -%}",
     "{%- if s == 'off' -%}{%- set ns.off = ns.off + 1 -%}{%- endif -%}",
     "{%- if is_state_attr(e, 'hvac_action', 'heating') -%}{%- set ns.heating = ns.heating + [n] -%}{%- endif -%}",
-    "{%- if r == 'room_sensor_lost' -%}{%- set ns.warn = ns.warn + [n ~ ': room sensor lost, valve closed'] -%}",
+    // SmartHeat 0.3.1: an underfloor zone keeps heating when its room sensor is lost, unless
+    // its valve was hardly open over the last day
+    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
+    `{%- if r == 'room_sensor_lost' and state_attr(e, 'fallback') == 'room_sensor' and not ${HOLD_SHUT} -%}{%- set ns.warn = ns.warn + [n ~ ${jstr(": room sensor lost, heating by the last day's average")}] -%}`,
+    "{%- elif r == 'room_sensor_lost' -%}{%- set ns.warn = ns.warn + [n ~ ': room sensor lost, valve closed'] -%}",
     "{%- elif r == 'room_sensor_unavailable' -%}{%- set ns.warn = ns.warn + [n ~ ': waiting for the room sensor'] -%}",
     "{%- elif r == 'max_return_temp' -%}{%- set ns.warn = ns.warn + [n ~ ': water too hot, valve closed'] -%}",
     "{%- elif r == 'window_open' -%}{%- set ns.note = ns.note + [n ~ ': window open, heating paused'] -%}",
@@ -427,6 +443,7 @@ function T4(z) {
     "{%- set hy = state_attr(e, 'hysteresis') -%}",
     "{%- set mr = state_attr(e, 'max_return_temp') -%}",
     "{%- set ft = state_attr(e, 'frost_temp') -%}",
+    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
     "{% if s in ['unavailable', 'unknown'] %}## Not responding",
     "",
     "SmartHeat can't control this zone right now. Check the zone under Settings at the bottom of this page.",
@@ -462,10 +479,14 @@ function T4(z) {
     `The return water is {{ (rt | round(1) ~ ' °C') if rt is number else 'too hot' }}, above {{ ('the ' ~ (mr | round(1)) ~ ' °C limit') if mr is number else 'the limit' }} for this zone, ${w.tooHot}.`,
     "{% elif r == 'room_sensor_unavailable' %}## Waiting for the room sensor",
     "",
-    "There is no reading from the room sensor right now. The valve keeps its position for a while.",
+    // SmartHeat 0.3.1: a silent sensor may still show its last value
+    "{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'There is no reading from the room sensor right now.' }} The valve keeps its position for a while.",
     "{% elif r == 'room_sensor_lost' %}## Room sensor lost",
     "",
-    "No reading for too long, so the valve is closed for safety. Check the sensor's battery and connection.",
+    // SmartHeat 0.3.1: an underfloor zone keeps heating by the last day's average, or keeps the
+    // valve closed if it was hardly open over the last day. A silent sensor may still show its
+    // last value.
+    `{% if state_attr(e, 'fallback') == 'room_sensor' %}The room sensor {{ 'has stopped reporting (it may still show its last value)' if state_attr(e, 'room_silent') else 'has had no reading for too long' }}, so SmartHeat {% if ${HOLD_SHUT} %}follows the last day's average. The valve was hardly open over the last day, so it stays closed until the sensor is back.{% else %}keeps heating by the last day's average{{ (': the valve opens **' ~ (fd | round(0)) ~ ' %** of every ${HOLD_INTERVAL_MIN} minutes') if fd is number else '' }}.{% endif %} Check the sensor's battery and connection.{% else %}No reading for too long, so the valve is closed for safety. Check the sensor's battery and connection.{% endif %}`,
     "{% elif r == 'frost_protection' %}## Frost protection",
     "",
     "The room is very cold, so the valve is open to protect it.",
@@ -507,7 +528,11 @@ function T5(z) {
     `{%- set e = ${jstr(z.climate)} -%}`,
     "{%- set ok = states(e) not in ['unavailable', 'unknown'] -%}",
     "{%- set r = state_attr(e, 'reason') -%}",
-    "{%- set labels = {'heating': 'Heating', 'idle': 'Warm enough', 'predictive_close': 'Closing early', 'coasting': 'Coasting', 'min_open_time': 'Minimum open time', 'min_closed_time': 'Minimum closed time', 'off': 'Zone off', 'window_open': 'Window open', 'max_return_temp': 'Water too hot', 'room_sensor_unavailable': 'Waiting for room sensor', 'room_sensor_lost': 'Room sensor lost', 'frost_protection': 'Frost protection'} -%}",
+    // SmartHeat 0.3.1: an underfloor zone keeps heating when its room sensor is lost, unless
+    // its valve was hardly open over the last day
+    "{%- set fd = state_attr(e, 'fallback_duty') -%}",
+    `{%- set lost = 'Room sensor lost: heating by average' if state_attr(e, 'fallback') == 'room_sensor' and not ${HOLD_SHUT} else 'Room sensor lost' -%}`,
+    "{%- set labels = {'heating': 'Heating', 'idle': 'Warm enough', 'predictive_close': 'Closing early', 'coasting': 'Coasting', 'min_open_time': 'Minimum open time', 'min_closed_time': 'Minimum closed time', 'off': 'Zone off', 'window_open': 'Window open', 'max_return_temp': 'Water too hot', 'room_sensor_unavailable': 'Waiting for room sensor', 'room_sensor_lost': lost, 'frost_protection': 'Frost protection'} -%}",
     "{%- macro deg(v, p) -%}{{ (v | round(p) ~ ' °C') if v is number else '–' }}{%- endmacro -%}",
     "| Decision | {{ labels.get(r, r) if ok and r else '–' }} |",
     "|:--|--:|",
@@ -518,6 +543,10 @@ function T5(z) {
     "| Valve closes at | {{ deg(state_attr(e, 'close_threshold'), 2) }} |",
     "| Coasting | {{ ('Yes' if state_attr(e, 'coasting') else 'No') if ok else '–' }} |",
   ];
+  // SmartHeat 0.3.1 underfloor zones: whether the room sensor counts as silent. An unavailable
+  // sensor is not silent, but it has no reading. A reading says nothing about reports: with
+  // the check off, or for a helper sensor, SmartHeat never counts the sensor as silent.
+  if (z.hasRoomSilent) rows.push("| Room sensor | {{ ('Silent' if state_attr(e, 'room_silent') else 'Has a reading' if state_attr(e, 'current_temperature') is number else 'No reading') if ok else '–' }} |");
   if (z.hasReturn) rows.push("| Return water | {{ deg(state_attr(e, 'return_temperature'), 1) }} |");
   // Supply − return and Loop saturated need both sensors
   if (z.hasSupply) {

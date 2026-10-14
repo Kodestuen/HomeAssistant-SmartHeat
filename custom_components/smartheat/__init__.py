@@ -19,15 +19,17 @@ from .const import (
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
     CONF_ROOM_SENSOR,
+    CONF_ROOM_SILENT,
     CONF_SENSOR_TIMEOUT,
     CONF_SYSTEM_TYPE,
     DOMAIN,
     INITIAL_OVERSHOOT,
     STORAGE_VERSION,
+    SYSTEM_UNDERFLOOR,
     default_options,
 )
-from .controller import Controller, ControllerConfig
-from .learning import OvershootModel
+from .controller import HOLD_INTERVAL_S, Controller, ControllerConfig, zone_phase
+from .learning import OvershootModel, ZoneCalibration
 
 PLATFORMS = [Platform.CLIMATE, Platform.SENSOR]
 
@@ -56,13 +58,27 @@ def _store(hass: HomeAssistant, entry: ConfigEntry) -> Store[dict[str, Any]]:
     return Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
 
 
+def learning_data(controller: Controller) -> dict[str, Any]:
+    """Return what a zone has learned, as it is saved.
+
+    The calibration sits next to the model's values, so a version that doesn't know it
+    can still read the model.
+    """
+    data = controller.model.to_dict()
+    if controller.calibration is not None:
+        data["calibration"] = controller.calibration.to_dict()
+    return data
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) -> bool:
     """Set up a SmartHeat zone."""
     config = zone_config(entry)
     store = _store(hass, entry)
-    model = OvershootModel.from_dict(
-        await store.async_load(), INITIAL_OVERSHOOT[config[CONF_SYSTEM_TYPE]]
-    )
+    data = await store.async_load() or {}
+    model = OvershootModel.from_dict(data, INITIAL_OVERSHOOT[config[CONF_SYSTEM_TYPE]])
+    # A floor that loses its room sensor keeps heating by the share its valve was open
+    # over the last day. Radiator zones close the valve, as before, and need no share.
+    underfloor = config[CONF_SYSTEM_TYPE] == SYSTEM_UNDERFLOOR
     controller = Controller(
         ControllerConfig(
             hysteresis=config[CONF_HYSTERESIS],
@@ -72,8 +88,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) ->
             max_return=config[CONF_MAX_RETURN],
             sensor_timeout_s=config[CONF_SENSOR_TIMEOUT] * 60,
             frost_temp=config[CONF_FROST_TEMP],
+            lost_room_hold=underfloor,
+            grid_phase_s=zone_phase(entry.entry_id, HOLD_INTERVAL_S),
+            room_silent_s=config.get(CONF_ROOM_SILENT, 0) * 3600 or None,
         ),
         model,
+        ZoneCalibration.from_dict(data.get("calibration")) if underfloor else None,
     )
     entry.runtime_data = SmartHeatData(controller, store)
     # The zone's device is registered with its entities, so none yet means a new zone
@@ -90,7 +110,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) -
     """Unload a zone, saving what it has learned."""
     if unloaded := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         data = entry.runtime_data
-        await data.store.async_save(data.controller.model.to_dict())
+        await data.store.async_save(learning_data(data.controller))
     return unloaded
 
 

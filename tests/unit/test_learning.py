@@ -4,7 +4,12 @@ import math
 
 import pytest
 
-from smartheat_core.learning import MAX_OVERSHOOT, OvershootModel, excess_heat
+from smartheat_core.learning import (
+    MAX_OVERSHOOT,
+    OvershootModel,
+    ZoneCalibration,
+    excess_heat,
+)
 
 H = 4.0
 X = 8.0  # return - room at close
@@ -118,3 +123,59 @@ def test_from_empty_storage():
     assert model.flat_overshoot == 0.2
     assert model.cycles == 0
     assert not model.trained
+
+
+def test_model_ignores_the_calibration_saved_next_to_it():
+    model = trained_model()
+    stored = {**model.to_dict(), "calibration": {"duty": 0.55}}
+    assert OvershootModel.from_dict(stored, 0.4) == model
+
+
+@pytest.mark.parametrize("stored", [None, {}, {"duty": None}, {"duty": "high"}])
+def test_calibration_defaults(stored):
+    calibration = ZoneCalibration.from_dict(stored)
+    assert calibration == ZoneCalibration()
+    assert calibration.duty == 0.4
+
+
+@pytest.mark.parametrize(
+    ("duty", "restored"), [(1.7, 1.0), (-0.2, 0.0), (float("nan"), 0.4), (0.25, 0.25)]
+)
+def test_calibration_duty_is_kept_within_0_and_1(duty, restored):
+    assert ZoneCalibration.from_dict({"duty": duty}).duty == restored
+
+
+def test_calibration_round_trip():
+    calibration = ZoneCalibration(duty=0.37)
+    assert calibration.to_dict() == {"duty": 0.37}
+    assert ZoneCalibration.from_dict(calibration.to_dict()) == calibration
+
+
+def test_duty_is_a_24h_average_of_the_open_share():
+    calibration = ZoneCalibration()
+    calibration.add_valve_time(True, 300)
+    step = 1 - math.exp(-300 / 86400)
+    assert calibration.duty == pytest.approx(0.4 + 0.6 * step)
+    duty = calibration.duty
+    calibration.add_valve_time(False, 300)
+    assert calibration.duty == pytest.approx(duty - duty * step)
+    calibration.add_valve_time(True, 0)
+    assert calibration.duty == pytest.approx(duty - duty * step)
+    calibration.add_valve_time(True, -1e6)  # a clock step back: no time passed
+    assert calibration.duty == pytest.approx(duty - duty * step)
+
+
+def test_calibration_revision_follows_lasting_changes_only():
+    calibration = ZoneCalibration()
+    for _ in range(4):  # 0.4 -> 0.4083
+        calibration.add_valve_time(True, 300)
+    assert calibration.revision == 0
+    calibration.add_valve_time(True, 300)  # 0.4103: moved 0.01
+    assert calibration.revision == 1
+
+    calibration.add_valve_time(True, 300)  # 0.4124
+    for _ in range(8):  # back down to 0.4011, 0.0092 below the last change
+        calibration.add_valve_time(False, 300)
+    assert calibration.revision == 1
+    calibration.add_valve_time(False, 300)  # 0.3997
+    assert calibration.revision == 2

@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.config_entries import SOURCE_USER
@@ -15,6 +16,7 @@ from custom_components.smartheat.const import (
     CONF_MIN_TEMP,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
+    CONF_ROOM_SILENT,
     CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
     CONF_VALVE,
@@ -182,3 +184,47 @@ async def test_options_flow_rejects_min_above_max(hass: HomeAssistant) -> None:
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {CONF_MAX_TEMP: "min_above_max"}
+
+
+@pytest.mark.parametrize(
+    ("system_type", "has_silent_option"),
+    [(SYSTEM_UNDERFLOOR, True), (SYSTEM_RADIATOR, False)],
+)
+async def test_room_sensor_silent_option_for_underfloor_zones(
+    hass: HomeAssistant, system_type: str, has_silent_option: bool
+) -> None:
+    entry = zone_entry(system_type)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.FORM
+    fields = {str(key) for key in result["data_schema"].schema}
+    assert (CONF_ROOM_SILENT in fields) is has_silent_option
+    assert CONF_HYSTERESIS in fields
+
+    options = {**default_options(system_type), **ENTITIES}
+    if has_silent_option:
+        options[CONF_ROOM_SILENT] = 12
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], options
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options.get(CONF_ROOM_SILENT) == (12 if has_silent_option else None)
+
+
+async def test_zone_from_before_the_silent_option_gets_its_default(
+    hass: HomeAssistant,
+) -> None:
+    options = {**default_options(SYSTEM_UNDERFLOOR), **ENTITIES}
+    del options[CONF_ROOM_SILENT]  # saved by SmartHeat 0.3.0
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Living room",
+        data={CONF_SYSTEM_TYPE: SYSTEM_UNDERFLOOR},
+        options=options,
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    [field] = [key for key in result["data_schema"].schema if key == CONF_ROOM_SILENT]
+    assert field.description == {"suggested_value": 6}

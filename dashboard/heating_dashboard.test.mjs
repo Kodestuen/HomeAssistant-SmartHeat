@@ -103,10 +103,12 @@ let zoneCounter = 0;
 // valve and sensors it controls. version 1 is SmartHeat 0.1.0 (no configuration attributes,
 // no model_id, no area); version 2 is SmartHeat 0.2.0. ret false is a radiator zone without a
 // return sensor (SmartHeat 0.3.0): it has no sensors that need the return temperature, and its
-// prediction is never trained.
+// prediction is never trained. version 3 is SmartHeat 0.3.1: every zone has the fallback
+// attributes, and an underfloor zone also checks whether its room sensor has gone silent for
+// silentHours (0 turns the check off).
 function addZone(snap, {
   id, name, system = "underfloor", version = 2, area = null, deviceArea = true, supply = false, ret = true,
-  window = null, invert = false, valveDomain = "switch", state = "heat", restored = false,
+  window = null, invert = false, valveDomain = "switch", state = "heat", restored = false, silentHours = 6,
   entryId = `01ZONE${String(++zoneCounter).padStart(20, "0")}`,
 }) {
   const deviceId = `device-${entryId.toLowerCase()}`;
@@ -150,6 +152,10 @@ function addZone(snap, {
       return_sensor_entity_id: inputs.ret, supply_sensor_entity_id: inputs.supply,
       window_sensor_entity_id: inputs.window, invert_valve: invert, trained: ret, ...TUNING[system],
     });
+  }
+  if (version >= 3) {
+    Object.assign(attributes, { fallback: null, fallback_duty: null });
+    if (system === "underfloor") Object.assign(attributes, { room_silent: false, room_sensor_silent_hours: silentHours });
   }
   // A zone that failed to load keeps its restored state
   if (restored) attributes = { friendly_name: name, supported_features: 401, restored: true };
@@ -446,6 +452,80 @@ describe("buildDashboard", () => {
     ]);
     assert.deepEqual(chart("Heat storage factor, 14 days"), [{ entity: "sensor.kokken_heat_storage_factor", name: "Køkken" }]);
     assert.deepEqual(chart("Heat-up rate, 14 days").map((e) => e.name), ["Stue", "Køkken"]);
+  });
+
+  test("zones like SmartHeat 0.3.1: the room sensor silent setting and row, and the fallback texts", () => {
+    const snap = newSnapshot({ areas: ["stue", "badevaerelse", "kontor", "kokken"] });
+    addZone(snap, { id: "stue", name: "Stue", area: "stue", supply: true, version: 3 });
+    addZone(snap, { id: "badevaerelse", name: "Badeværelse", system: "radiator", area: "badevaerelse", version: 3 });
+    addZone(snap, { id: "kontor", name: "Kontor", area: "kontor" }); // underfloor, SmartHeat 0.3.0
+    addZone(snap, { id: "kokken", name: "Køkken", area: "kokken", version: 3, silentHours: 0 }); // the silent check is off
+    const { config, warnings, zones } = build(snap);
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(zones.map((z) => [z.path, z.tuning]), [["zone-stue", 10], ["zone-badevaerelse", 9], ["zone-kontor", 9], ["zone-kokken", 10]]);
+    const views = ["zone-stue", "zone-badevaerelse", "zone-kontor", "zone-kokken"].map((p) => viewByPath(config, p));
+    const [stue, bath, office, kitchen] = views;
+
+    // Only the underfloor zones of SmartHeat 0.3.1 have the silent time, after the room sensor
+    // timeout. At 0 h (off) the row stays, and its name says what 0 means.
+    const tuning = (view) => findSection(view, "Settings").cards[1].entities.slice(3).map((r) => r.attribute ?? r.label);
+    const before = ["Current tuning", "hysteresis", "min_open_minutes", "min_closed_minutes", "coast_window_minutes", "max_return_temp", "sensor_timeout_minutes"];
+    const after = ["eco_temp", "away_temp", "frost_temp"];
+    assert.deepEqual(tuning(stue), [...before, "room_sensor_silent_hours", ...after]);
+    assert.deepEqual(tuning(kitchen), [...before, "room_sensor_silent_hours", ...after]);
+    assert.deepEqual(tuning(bath), [...before, ...after]);
+    assert.deepEqual(tuning(office), [...before, ...after]);
+    for (const [view, climate] of [[stue, "climate.stue"], [kitchen, "climate.kokken"]]) {
+      assert.deepEqual(findSection(view, "Settings").cards[1].entities.find((r) => r.attribute === "room_sensor_silent_hours"), {
+        type: "attribute", entity: climate, attribute: "room_sensor_silent_hours",
+        name: "Room sensor silent after (0 = off)", suffix: "h", icon: "mdi:signal-off",
+      });
+    }
+
+    // The Room sensor row follows the room_silent attribute, so radiators and older zones have
+    // none. Without the check a sensor is never silent, so the row only tells whether it has a
+    // reading.
+    assert.deepEqual(controllerRows(stue), [
+      ...FIRST_ROWS, "Room sensor", "Return water", "Supply water", "Supply − return", "Hot water arriving", "Loop saturated", "Prediction",
+    ]);
+    assert.deepEqual(controllerRows(kitchen), [...FIRST_ROWS, "Room sensor", "Return water", "Prediction"]);
+    assert.deepEqual(controllerRows(bath), [...FIRST_ROWS, "Return water", "Prediction"]);
+    assert.deepEqual(controllerRows(office), [...FIRST_ROWS, "Return water", "Prediction"]);
+    for (const view of [stue, kitchen]) {
+      assert.ok(findSection(view, "Controller").cards[1].content.includes(
+        "| Room sensor | {{ ('Silent' if state_attr(e, 'room_silent') else 'Has a reading' if state_attr(e, 'current_temperature') is number else 'No reading') if ok else '–' }} |"));
+    }
+
+    // The fallback texts are in every zone's templates and only show while the fallback
+    // attribute is room_sensor, so a radiator zone still says that the valve is closed. A hold
+    // with a share of 0 % (the valve was hardly open over the last day) keeps the valve closed,
+    // so then no text says that the zone is heating.
+    const shut = "(fd is number and fd | round(0) == 0)";
+    const summary = config.views[0].header.card.content;
+    assert.ok(summary.includes("{%- set fd = state_attr(e, 'fallback_duty') -%}"));
+    assert.ok(summary.includes(`{%- if r == 'room_sensor_lost' and state_attr(e, 'fallback') == 'room_sensor' and not ${shut} -%}{%- set ns.warn = ns.warn + [n ~ ': room sensor lost, heating by the last day\\'s average'] -%}`));
+    assert.ok(summary.includes("{%- elif r == 'room_sensor_lost' -%}{%- set ns.warn = ns.warn + [n ~ ': room sensor lost, valve closed'] -%}"));
+    for (const view of views) {
+      const status = view.header.card.content;
+      assert.ok(status.includes("{%- set fd = state_attr(e, 'fallback_duty') -%}"));
+      assert.ok(status.includes("{% if state_attr(e, 'fallback') == 'room_sensor' %}The room sensor {{ 'has stopped reporting (it may still show its last value)' if state_attr(e, 'room_silent') else 'has had no reading for too long' }}, so SmartHeat "));
+      assert.ok(status.includes(`{% if ${shut} %}follows the last day's average. The valve was hardly open over the last day, so it stays closed until the sensor is back.{% else %}`));
+      assert.ok(status.includes("{% else %}keeps heating by the last day's average{{ (': the valve opens **' ~ (fd | round(0)) ~ ' %** of every 45 minutes') if fd is number else '' }}.{% endif %} Check the sensor's battery and connection.{% else %}"));
+      assert.ok(status.includes("{% else %}No reading for too long, so the valve is closed for safety. Check the sensor's battery and connection.{% endif %}"));
+      // A silent sensor counts as lost from its last report, so it only waits here when the
+      // room sensor timeout is longer than the silent time
+      assert.ok(status.includes("{{ 'The room sensor has stopped reporting (it may still show its last value).' if state_attr(e, 'room_silent') else 'There is no reading from the room sensor right now.' }} The valve keeps its position for a while."));
+      const table = findSection(view, "Controller").cards[1].content;
+      assert.ok(table.includes("{%- set fd = state_attr(e, 'fallback_duty') -%}"));
+      assert.ok(table.includes(`{%- set lost = 'Room sensor lost: heating by average' if state_attr(e, 'fallback') == 'room_sensor' and not ${shut} else 'Room sensor lost' -%}`));
+      assert.ok(table.includes("'room_sensor_lost': lost,"));
+    }
+
+    // The same snapshot always gives the same config, whatever the order of its lists
+    assert.equal(JSON.stringify(buildDashboard(structuredClone(snap))), JSON.stringify(buildDashboard(snap)));
+    const shuffled = structuredClone(snap);
+    for (const key of ["get_states", "config/entity_registry/list", "config/device_registry/list", "config_entries/get"]) shuffled[key].reverse();
+    assert.equal(JSON.stringify(build(shuffled).config), JSON.stringify(config));
   });
 
   test("an unavailable or deleted water sensor keeps its controller rows, and the water chart shows the ones that exist", () => {

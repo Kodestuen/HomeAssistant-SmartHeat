@@ -25,6 +25,7 @@ CONF_MIN_CLOSED = "min_closed_minutes"
 CONF_COAST_WINDOW = "coast_window_minutes"
 CONF_MAX_RETURN = "max_return_temp"
 CONF_SENSOR_TIMEOUT = "sensor_timeout_minutes"
+CONF_ROOM_SILENT = "room_sensor_silent_hours"
 CONF_FROST_TEMP = "frost_temp"
 CONF_ECO_TEMP = "eco_temp"
 CONF_AWAY_TEMP = "away_temp"
@@ -61,6 +62,7 @@ SYSTEM_DEFAULTS = {
         CONF_MIN_CLOSED: 15,
         CONF_COAST_WINDOW: 240,
         CONF_MAX_RETURN: 45.0,
+        CONF_ROOM_SILENT: 6,  # hours, 0 = off
     },
     SYSTEM_RADIATOR: {
         CONF_MIN_OPEN: 5,
