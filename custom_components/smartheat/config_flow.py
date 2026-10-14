@@ -18,6 +18,7 @@ from homeassistant.helpers import selector
 
 from . import zone_config
 from .const import (
+    CONF_AIM_OFFSET,
     CONF_AWAY_TEMP,
     CONF_COAST_WINDOW,
     CONF_ECO_TEMP,
@@ -102,6 +103,7 @@ OPTIONS = {
     vol.Required(CONF_AWAY_TEMP): _number(5, 30, 0.5, CELSIUS),
     vol.Required(CONF_FROST_TEMP): _number(0, 15, 0.5, CELSIUS),
     vol.Required(CONF_HYSTERESIS): _number(0.1, 2, 0.1, CELSIUS),
+    vol.Required(CONF_AIM_OFFSET): _number(-0.5, 0.5, 0.05, CELSIUS),
     vol.Required(CONF_MIN_OPEN): _number(0, 120, 1, MINUTES),
     vol.Required(CONF_MIN_CLOSED): _number(0, 120, 1, MINUTES),
     vol.Required(CONF_COAST_WINDOW): _number(10, 720, 5, MINUTES),

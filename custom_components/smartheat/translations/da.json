@@ -49,6 +49,7 @@
           "away_temp": "Temperatur ved fravær",
           "frost_temp": "Frostsikringstemperatur",
           "hysteresis": "Hysterese",
+          "aim_offset": "Tillæg til måltemperaturen",
           "min_open_minutes": "Mindste åbningstid",
           "min_closed_minutes": "Mindste lukketid",
           "coast_window_minutes": "Efterløbsvindue",
@@ -61,6 +62,7 @@
           "invert_valve": "Slå til for en normalt åben aktuator, hvor tænd lukker ventilen.",
           "frost_temp": "Ventilen åbner under denne temperatur, også når zonen er slukket.",
           "hysteresis": "Ventilen åbner, når rummet er så meget under måltemperaturen.",
+          "aim_offset": "Termostaten sigter så meget over måltemperaturen, eller under den ved et negativt tal, når den åbner, lukker og lærer. Et rum, der topper ved måltemperaturen, er i gennemsnit lidt koldere end den; med +0,15 °C rammer en typisk gulvvarmezone den i gennemsnit. Den viste måltemperatur ændres ikke.",
           "min_open_minutes": "Termiske aktuatorer skal bruge et par minutter på at åbne helt.",
           "coast_window_minutes": "Hvor længe der ventes på, at rummet topper efter en tidlig lukning.",
           "max_return_temp": "Ventilen lukker over denne temperatur, fx for at beskytte gulvet. Bruges kun med en returføler.",
@@ -208,6 +210,9 @@
           },
           "hysteresis": {
             "name": "Hysterese"
+          },
+          "aim_offset": {
+            "name": "Tillæg til måltemperaturen"
           },
           "min_open_minutes": {
             "name": "Mindste åbningstid"

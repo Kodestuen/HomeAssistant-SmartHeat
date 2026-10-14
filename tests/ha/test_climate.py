@@ -42,6 +42,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.smartheat.const import (
+    CONF_AIM_OFFSET,
     CONF_HYSTERESIS,
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
@@ -165,6 +166,37 @@ async def test_opens_when_cold_and_closes_before_target(hass: HomeAssistant) -> 
     attributes = hass.states.get(CLIMATE).attributes
     assert attributes["coasting"] is True
     assert attributes["reason"] == "coasting"
+
+
+async def test_aim_offset_moves_the_valve_not_the_target(hass: HomeAssistant) -> None:
+    entry = await setup_zone(hass, **{CONF_AIM_OFFSET: 0.15})
+    assert entry.runtime_data.controller.config.aim_offset == 0.15
+    set_temperature(hass, ROOM, 20.8)  # opens below 21.15 - 0.3
+    await hass.async_block_till_done()
+    assert hass.states.get(VALVE).state == STATE_ON
+    attributes = hass.states.get(CLIMATE).attributes
+    assert attributes[ATTR_TEMPERATURE] == 21.0
+    assert attributes["aim_offset"] == 0.15
+    assert attributes["close_threshold"] == 20.95  # 21.15 - 0.2
+
+    set_temperature(hass, ROOM, 20.9)  # without the offset, it would close here
+    await hass.async_block_till_done()
+    assert hass.states.get(VALVE).state == STATE_ON
+    set_temperature(hass, ROOM, 21.0)
+    await hass.async_block_till_done()
+    assert hass.states.get(VALVE).state == STATE_OFF
+    assert hass.states.get(CLIMATE).attributes["reason"] == "coasting"
+
+
+@pytest.mark.parametrize("system_type", [SYSTEM_UNDERFLOOR, SYSTEM_RADIATOR])
+async def test_zone_saved_before_the_aim_offset_aims_at_the_target(
+    hass: HomeAssistant, system_type: str
+) -> None:
+    entry = await setup_zone(hass, system_type=system_type, **{CONF_AIM_OFFSET: None})
+    assert entry.runtime_data.controller.config.aim_offset == 0.0
+    state = hass.states.get(CLIMATE)
+    assert state.attributes["aim_offset"] == 0.0
+    assert "aim_offset" in state.state_info["unrecorded_attributes"]
 
 
 async def test_zone_without_return_sensor(
@@ -619,6 +651,7 @@ async def test_exposes_zone_configuration(
         key: entry.options[key]
         for key in (
             "hysteresis",
+            "aim_offset",
             "min_open_minutes",
             "min_closed_minutes",
             "coast_window_minutes",

@@ -389,6 +389,54 @@ def test_reset_learning_forgets_and_stops_coasting():
     assert zone.model.flat_overshoot == 0.8
 
 
+@pytest.mark.parametrize("offset", [0.0, 0.15, -0.2])
+def test_aim_offset_moves_the_open_and_close_points(offset):
+    zone = Zone(aim_offset=offset)  # flat overshoot 0.4
+    aim = 21.0 + offset
+    assert zone.step(aim - 0.25).reason == REASON_IDLE  # within the hysteresis
+    decision = zone.step(aim - 0.35)
+    assert decision.reason == REASON_HEATING
+    assert decision.close_threshold == pytest.approx(aim - 0.4)
+    assert zone.step(aim - 0.45, ret=30.0, minutes=20).valve_open
+    assert zone.step(aim - 0.35, ret=30.0).reason == REASON_PREDICTIVE_CLOSE
+
+
+def test_aim_offset_moves_the_coast_target():
+    zone = Zone(initial_overshoot=0.8, aim_offset=0.15)  # closes at 20.35
+    zone.step(20.0)
+    assert zone.step(20.4, ret=28.0, minutes=20).reason == REASON_PREDICTIVE_CLOSE
+    zone.step(20.5, ret=26.0)
+    assert zone.ctrl.coasting
+    assert zone.ctrl.coast.target == pytest.approx(21.15)
+
+    zone.step(20.8, minutes=30)
+    zone.step(21.1, minutes=30)
+    decision = zone.step(21.0, minutes=30)  # fell 0.1 below the peak
+    assert not zone.ctrl.coasting
+    assert decision.reason == REASON_IDLE  # above 21.15 - 0.3
+    assert zone.model.last_overshoot == pytest.approx(0.7)
+    assert zone.model.last_peak_error == pytest.approx(-0.05)  # the peak vs 21.15
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.15, -0.2])
+def test_aim_offset_acts_like_a_target_that_much_higher(offset):
+    """An offset of 0 changes nothing: the same decisions, and the same learning."""
+    aimed, raised = Zone(aim_offset=offset), Zone()
+    floor = room = 20.0
+    for minute in range(24 * 60):  # a crude floor, heated while the valve is open
+        target = 21.0 if 6 * 60 <= minute < 22 * 60 else 19.0
+        if aimed.valve:
+            floor += 0.02 * (35.0 - floor)
+        floor -= 0.01 * (floor - room)
+        room += 0.004 * (floor - room) - 0.001 * (room - 5.0)
+        decision = aimed.step(round(room, 1), ret=round(floor, 1), target=target)
+        assert decision == raised.step(
+            round(room, 1), ret=round(floor, 1), target=target + offset
+        )
+    assert aimed.model.cycles >= 5
+    assert aimed.model == raised.model
+
+
 def test_same_state_report_does_not_restart_min_open_time():
     zone = Zone()
     zone.step(20.0)  # opens at minute 1

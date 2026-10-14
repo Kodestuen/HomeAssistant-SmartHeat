@@ -12,6 +12,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    CONF_AIM_OFFSET,
     CONF_COAST_WINDOW,
     CONF_FROST_TEMP,
     CONF_HYSTERESIS,
@@ -82,6 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) ->
     controller = Controller(
         ControllerConfig(
             hysteresis=config[CONF_HYSTERESIS],
+            aim_offset=config[CONF_AIM_OFFSET],
             min_open_s=config[CONF_MIN_OPEN] * 60,
             min_closed_s=config[CONF_MIN_CLOSED] * 60,
             coast_window_s=config[CONF_COAST_WINDOW] * 60,

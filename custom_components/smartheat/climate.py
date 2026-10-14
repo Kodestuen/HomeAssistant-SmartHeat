@@ -58,6 +58,7 @@ from .const import (
     ATTR_SYSTEM_TYPE,
     ATTR_VALVE_ENTITY_ID,
     ATTR_WINDOW_SENSOR_ENTITY_ID,
+    CONF_AIM_OFFSET,
     CONF_AWAY_TEMP,
     CONF_COAST_WINDOW,
     CONF_ECO_TEMP,
@@ -97,6 +98,7 @@ VALVE_STATES = {"open": True, "opening": True, "closed": False, "closing": False
 # Tuning options that are also attributes, under their option keys
 TUNING_ATTRIBUTES = (
     CONF_HYSTERESIS,
+    CONF_AIM_OFFSET,
     CONF_MIN_OPEN,
     CONF_MIN_CLOSED,
     CONF_COAST_WINDOW,

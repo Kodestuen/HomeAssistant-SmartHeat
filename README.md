@@ -66,11 +66,15 @@ After the first days of learning, the room peaks this far from the target on ave
 
 The learned values match the model: β ≈ 2.0 for the floor (the true capacity ratio is 1.8), and h ≈ 4.1 °C (true 4.2 °C).
 
-The trade-off: because the room peaks *at* the target, its average is a little below the target (about 0.2–0.3 °C in the simulation).
+The trade-off: because the room peaks *at* the target, its average is a little below the target (about 0.2–0.3 °C in the simulation). The [aim offset](#aim-offset) can lift it.
 
 To print these numbers yourself, run `python tests/unit/test_simulation.py`.
 
 **Loop simulation.** `tests/unit/test_simulation_loop.py` runs an underfloor zone on a more detailed floor: two loops with a 7-minute transit that pass only part of their heat to the screed, a wax actuator that takes 4 minutes to open, a return sensor on the pipe at the manifold, and a 35 °C supply. With all sensors working, the room stays 0.36–0.37 °C from the target on average during the day. Then the room sensor is lost for 24 hours, in three weather runs. With the valve closed, as in SmartHeat 0.3.0, the room cools to 9.9, 4.8 and 4.8 °C. With the duty hold it stays at 20.2–23.5, 18.4–19.4 and 17.6–20.3 °C. To print these numbers, run `python tests/unit/test_simulation_loop.py`.
+
+### Aim offset
+
+The room peaks at the target, so its average sits about 0.2–0.27 °C below it. The setting **Aim offset** moves the whole cycle up, or down if negative: the thermostat opens, closes and learns as if the offset were added to the target, while the target shown stays the same. In the loop simulation, +0.15 °C for an underfloor zone lifts the room's daytime average from 0.18–0.21 °C below the target to 0.01–0.03 °C below it. Its mean distance from the target drops from 0.36–0.37 to 0.31–0.34 °C (10–14 % less), with about as many valve openings (5–6 a day) and less than 1 % more heat. For radiators, leave it at 0 unless the room feels cool.
 
 ### Radiators without a return sensor
 
@@ -99,6 +103,7 @@ The system type sets the defaults. Every setting can be changed later under the 
 | Setting | Underfloor | Radiators |
 |---|---|---|
 | Hysteresis (opens this far below target) | 0.3 °C | 0.3 °C |
+| Aim offset (the thermostat aims this far above the target) | 0 °C | 0 °C |
 | Minimum open / closed time | 15 / 15 min | 5 / 5 min |
 | Coast window (longest wait for the peak) | 240 min | 60 min |
 | Maximum return temperature (with a return sensor) | 45 °C | 75 °C |
@@ -118,7 +123,7 @@ Each zone is a device with one climate entity. When you add a zone, its device i
   - `reason`: why the valve is open or closed right now
   - `fallback`: `room_sensor` while an underfloor zone follows the last day's average because its room sensor is lost ([rule 6](#how-it-works)), otherwise null. `fallback_duty` is then the share of each 45 minutes that the valve opens, in percent, rounded as in rule 6: 0 means the valve stays closed.
   - `room_silent` (underfloor zones): true while the room sensor counts as lost because it hasn't sent a new reading for the **Room sensor silent after** time
-  - `predicted_overshoot` and `close_threshold`
+  - `predicted_overshoot` and `close_threshold` (which includes the aim offset)
   - `trained`: true once β and h are learned; the prediction then uses them whenever the return temperature is known, and the plain average otherwise. Always false without a return sensor.
   - `coasting`
   - `return_temperature` (null without a return sensor)
@@ -127,7 +132,7 @@ Each zone is a device with one climate entity. When you add a zone, its device i
   - `system_type`: `underfloor` or `radiator`
   - `valve_entity_id`, `room_sensor_entity_id`, `return_sensor_entity_id`, `supply_sensor_entity_id` and `window_sensor_entity_id` (null when the zone has no such sensor)
   - `invert_valve`
-  - the tuning, under the option names: `hysteresis`, `min_open_minutes`, `min_closed_minutes`, `coast_window_minutes`, `max_return_temp`, `sensor_timeout_minutes`, `eco_temp`, `away_temp` and `frost_temp`, plus `room_sensor_silent_hours` for underfloor zones
+  - the tuning, under the option names: `hysteresis`, `aim_offset`, `min_open_minutes`, `min_closed_minutes`, `coast_window_minutes`, `max_return_temp`, `sensor_timeout_minutes`, `eco_temp`, `away_temp` and `frost_temp`, plus `room_sensor_silent_hours` for underfloor zones
 
 Each zone also has diagnostic sensors. Graph them to watch the learning:
 
@@ -137,7 +142,7 @@ Each zone also has diagnostic sensors. Graph them to watch the learning:
 | Heat storage factor | β; only with a return sensor |
 | Holding difference | h; only with a return sensor |
 | Learning cycles | Number of cycles learned from |
-| Last peak vs target | How far the last peak landed from the target; should settle near 0 |
+| Last peak vs target | How far the last peak landed from the target it aimed at (the target plus the aim offset); should settle near 0 |
 | Heat-up rate | Room warm-up rate while the valve is open (°C/h) |
 | Valve open (24 h) | Share of the last 24 hours the valve was open |
 | Supply-return difference | Only with both a supply and a return sensor |

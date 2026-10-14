@@ -14,7 +14,8 @@ This plant is closer to a real floor:
 
 The zone runs SmartHeat's real controller with the installed underfloor defaults. The
 tests take the room sensor away for 24 h: SmartHeat 0.3.0 closed the valve for good
-and the room cooled far below the target; the duty hold keeps it warm.
+and the room cooled far below the target; the duty hold keeps it warm. They also aim
+the thermostat 0.15 °C above the target, which brings the room's average closer to it.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ DAYS = 12
 MEASURE_FROM_DAY = 4
 OUTAGE = (6 * DAY, 7 * DAY)  # the room sensor is unavailable from day 6, 00:00
 PHASES = (0.0, 1.3, 2.6)  # where in its 5-day cycle the weather starts
+AIM = 0.15  # the aim offset the README suggests for underfloor zones
 
 
 class FloorPlant:
@@ -138,11 +140,24 @@ class Result:
     def mean_abs_error(self) -> float:
         return sum(abs(e) for e in self.comfort_errors) / len(self.comfort_errors)
 
+    @property
+    def mean_error(self) -> float:
+        """How far the room sits above the target on average; below if negative."""
+        return sum(self.comfort_errors) / len(self.comfort_errors)
 
-def zone_config(hold: bool) -> ControllerConfig:
+    @property
+    def openings_per_day(self) -> float:
+        """Valve openings a day from day 4 on. The valve starts closed."""
+        opened = self.valve_changes[::2]
+        measured = sum(1 for t in opened if t > MEASURE_FROM_DAY * DAY)
+        return measured / (DAYS - MEASURE_FROM_DAY)
+
+
+def zone_config(hold: bool, aim: float = 0.0) -> ControllerConfig:
     """The installed underfloor defaults, with or without what 0.3.1 adds."""
     return ControllerConfig(
         hysteresis=0.3,
+        aim_offset=aim,
         min_open_s=900,
         min_closed_s=900,
         coast_window_s=4 * 3600,
@@ -153,13 +168,15 @@ def zone_config(hold: bool) -> ControllerConfig:
 
 
 @cache
-def simulate(phase: float, hold: bool, outage: bool = False) -> Result:
+def simulate(
+    phase: float, hold: bool, outage: bool = False, aim: float = 0.0
+) -> Result:
     """Run the zone for 12 days; measure the true room from day 4 on."""
     plant = FloorPlant(weather(phase))
     room_sensor = Sensor(plant.room, lag_s=600)
     return_sensor = Sensor(plant.tail, lag_s=90)
     controller = Controller(
-        zone_config(hold),
+        zone_config(hold, aim),
         OvershootModel(initial_overshoot=0.4),
         ZoneCalibration() if hold else None,
     )
@@ -220,14 +237,33 @@ def test_hold_changes_nothing_while_the_sensors_work(phase):
     assert with_hold.comfort_errors == without.comfort_errors
 
 
+@pytest.mark.parametrize("phase", PHASES)
+def test_aim_offset_brings_the_room_closer_to_the_target(phase):
+    """The room peaks at the target, so on average it sits below it."""
+    plain = simulate(phase, hold=True)
+    aimed = simulate(phase, hold=True, aim=AIM)
+    assert plain.mean_error < 0
+    assert aimed.mean_abs_error < plain.mean_abs_error
+    assert abs(aimed.mean_error) < abs(plain.mean_error)
+
+
 # python tests/unit/test_simulation_loop.py prints the README numbers
 if __name__ == "__main__":
-    print(f"{'weather phase':36}" + "".join(f"{p:>12}" for p in PHASES))
-    errors = [simulate(p, hold=True).mean_abs_error for p in PHASES]
-    print(
-        f"{'occupied mean |room - target| (K)':36}"
-        + "".join(f"{e:12.2f}" for e in errors)
+    controllers = (
+        ("thermostat", {}),
+        (f"thermostat, aim offset {AIM:+.2f}", {"aim": AIM}),
     )
+    rows = (
+        ("occupied mean |room - target| (K)", lambda r: f"{r.mean_abs_error:12.2f}"),
+        ("occupied mean room - target (K)", lambda r: f"{r.mean_error:+12.2f}"),
+        ("valve openings a day", lambda r: f"{r.openings_per_day:12.1f}"),
+    )
+    print(f"{'weather phase':36}" + "".join(f"{p:>12}" for p in PHASES))
+    for title, show in rows:
+        print(title)
+        for label, options in controllers:
+            runs = [simulate(p, hold=True, **options) for p in PHASES]
+            print(f"  {label:34}" + "".join(show(r) for r in runs))
     print("24 h room sensor outage, room (C):")
     for label, hold in (
         ("  valve closes (0.3.0)", False),

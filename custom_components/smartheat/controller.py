@@ -47,6 +47,7 @@ class ControllerConfig:
     """Tuning for one zone. Times in seconds, temperatures in °C."""
 
     hysteresis: float = 0.3
+    aim_offset: float = 0.0  # the thermostat aims this far above the target
     min_open_s: float = 900.0
     min_closed_s: float = 900.0
     coast_window_s: float = 14400.0
@@ -219,6 +220,7 @@ class Controller:
 
     def update(self, inp: Inputs, now: float) -> Decision:
         """Take in the current inputs and decide what the valve should do."""
+        inp = self._aim(inp)
         silent_s = self.config.room_silent_s
         # A sensor can keep its last value long after it stopped reporting
         self.room_silent = bool(
@@ -269,6 +271,17 @@ class Controller:
             for begin, end in self._open_intervals
         )
         return min(max(100.0 * open_s / DUTY_WINDOW_S, 0.0), 100.0)
+
+    def _aim(self, inp: Inputs) -> Inputs:
+        """Return the inputs with the target the thermostat aims at.
+
+        A room that peaks at the target sits a little below it on average. The aim
+        offset moves the whole cycle: the thermostat opens, closes and learns as if
+        the offset were added to the target, while the target shown stays the same.
+        A controller that centres the room by itself returns the inputs unchanged.
+        """
+        offset = self.config.aim_offset
+        return replace(inp, target=inp.target + offset) if offset else inp
 
     def _observe_valve(self, inp: Inputs, now: float) -> None:
         if inp.valve_open is None:

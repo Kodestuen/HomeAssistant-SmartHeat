@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.smartheat.const import (
+    CONF_AIM_OFFSET,
     CONF_HYSTERESIS,
     CONF_MAX_TEMP,
     CONF_MIN_TEMP,
@@ -228,3 +229,31 @@ async def test_zone_from_before_the_silent_option_gets_its_default(
     result = await hass.config_entries.options.async_init(entry.entry_id)
     [field] = [key for key in result["data_schema"].schema if key == CONF_ROOM_SILENT]
     assert field.description == {"suggested_value": 6}
+
+
+@pytest.mark.parametrize("system_type", [SYSTEM_UNDERFLOOR, SYSTEM_RADIATOR])
+async def test_aim_offset_option_for_every_zone(
+    hass: HomeAssistant, system_type: str
+) -> None:
+    options = {**default_options(system_type), **ENTITIES}
+    del options[CONF_AIM_OFFSET]  # saved by SmartHeat 0.3
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Living room",
+        data={CONF_SYSTEM_TYPE: system_type},
+        options=options,
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    schema = result["data_schema"].schema
+    [field] = [key for key in schema if key == CONF_AIM_OFFSET]
+    assert field.description == {"suggested_value": 0.0}
+    number = schema[field].config
+    assert (number["min"], number["max"], number["step"]) == (-0.5, 0.5, 0.05)
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**options, CONF_AIM_OFFSET: 0.15}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_AIM_OFFSET] == 0.15

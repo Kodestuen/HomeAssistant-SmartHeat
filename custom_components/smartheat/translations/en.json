@@ -49,6 +49,7 @@
           "away_temp": "Away temperature",
           "frost_temp": "Frost protection temperature",
           "hysteresis": "Hysteresis",
+          "aim_offset": "Aim offset",
           "min_open_minutes": "Minimum open time",
           "min_closed_minutes": "Minimum closed time",
           "coast_window_minutes": "Coast window",
@@ -61,6 +62,7 @@
           "invert_valve": "Turn on for a normally open actuator, where switching on closes the valve.",
           "frost_temp": "The valve opens below this temperature, even when the zone is off.",
           "hysteresis": "The valve opens when the room is this much below the target.",
+          "aim_offset": "The thermostat aims this much above the target, or below it if negative, when it opens, closes and learns. A room that peaks at the target sits a little below it on average, so +0.15 °C centres a typical underfloor zone. The target shown doesn't change.",
           "min_open_minutes": "Thermal actuators need a few minutes to open fully.",
           "coast_window_minutes": "How long to wait for the room to peak after an early close.",
           "max_return_temp": "The valve closes above this, for example to protect the floor. Only used with a return sensor.",
@@ -208,6 +210,9 @@
           },
           "hysteresis": {
             "name": "Hysteresis"
+          },
+          "aim_offset": {
+            "name": "Aim offset"
           },
           "min_open_minutes": {
             "name": "Minimum open time"

@@ -20,6 +20,7 @@ CONF_INVERT_VALVE = "invert_valve"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
 CONF_HYSTERESIS = "hysteresis"
+CONF_AIM_OFFSET = "aim_offset"
 CONF_MIN_OPEN = "min_open_minutes"
 CONF_MIN_CLOSED = "min_closed_minutes"
 CONF_COAST_WINDOW = "coast_window_minutes"
@@ -50,6 +51,7 @@ COMMON_DEFAULTS = {
     CONF_MIN_TEMP: 5.0,
     CONF_MAX_TEMP: 28.0,
     CONF_HYSTERESIS: 0.3,
+    CONF_AIM_OFFSET: 0.0,
     CONF_SENSOR_TIMEOUT: 30,
     CONF_FROST_TEMP: 7.0,
     CONF_ECO_TEMP: 19.0,
