@@ -74,6 +74,8 @@ class Inputs:
     valve_open: bool | None = None  # actual valve state, None if unknown
     valve_changed_at: float | None = None  # when the valve last changed state
     room_updated_at: float | None = None  # when the room sensor last reported
+    outside: float | None = None  # outdoor temperature, None if unknown
+    calibrate: bool = True  # False in presets the zone shouldn't calibrate in
 
 
 @dataclass
@@ -86,6 +88,8 @@ class Decision:
     close_threshold: float | None = None
     fallback: str | None = None  # the lost sensor the valve is working around
     fallback_share: float | None = None  # share of each interval it opens, 0-1
+    return_threshold: float | None = None  # return temperature that ends a pulse
+    next_pulse: float | None = None  # the next grid point, s since the epoch
 
 
 @dataclass
@@ -169,6 +173,10 @@ def hold_on_time(share: float, interval_s: float, min_s: float = HOLD_MIN_S) -> 
 class Controller:
     """Decides when the valve opens and closes, and feeds the learning."""
 
+    # Whether the zone teaches the overshoot model. A subclass that controls the valve
+    # some other way leaves the model exactly as the thermostat learned it.
+    learns_overshoot = True
+
     def __init__(
         self,
         config: ControllerConfig,
@@ -243,8 +251,9 @@ class Controller:
         self._observe_valve(inp, now)
         self._track_duty(inp, now)
         self._track_supply(inp, now)
-        self._track_valley(inp)
-        self._track_coast(inp, now)
+        if self.learns_overshoot:
+            self._track_valley(inp)
+            self._track_coast(inp, now)
 
         decision = self._decide(inp, now)
         if decision.valve_open:
@@ -330,7 +339,8 @@ class Controller:
             self._open_intervals[-1][1] = at
         had_heat = not self.no_heat_source
         if (
-            had_heat
+            self.learns_overshoot
+            and had_heat
             and self._open_started is not None
             and self._open_room is not None
             and ref.room is not None
@@ -502,29 +512,42 @@ class Controller:
         This keeps a floor warm without its room sensor. The share is the valve's open
         share over the last day, frozen when the hold starts.
         """
+        valve_open, on_s = self._timed_opening(self._frozen_share(), open_now, now)
+        return Decision(
+            valve_open,
+            REASON_ROOM_SENSOR_LOST,
+            fallback=FALLBACK_ROOM_SENSOR,
+            fallback_share=on_s / self.grid.interval_s,  # as rounded to whole moves
+        )
+
+    def _frozen_share(self) -> float:
+        """Return the open share of the last day, as it was when the room was lost."""
         if self._hold_share is None:
             self._hold_share = (
                 self.calibration.duty if self.calibration is not None else INITIAL_DUTY
             )
+        return self._hold_share
+
+    def _timed_opening(
+        self, share: float, open_now: bool, now: float
+    ) -> tuple[bool, float]:
+        """Return whether a timed opening has the valve open, and how long it opens.
+
+        The valve opens at each grid point for the share of the interval.
+        """
         grid = self.grid
         start = grid.last(now)
-        on_s = hold_on_time(self._hold_share, grid.interval_s)
+        on_s = hold_on_time(share, grid.interval_s)
         if self.last_decision is None or self.last_decision.fallback is None:
-            self._hold_pulse = None  # the hold starts, or a safety rule interrupted it
+            self._hold_pulse = None  # the openings start, or a safety rule interrupted
         # The valve opens only at a grid point, unless the point is seen so late, after
         # a gap in the updates, that less than half the shortest opening is left
         if self._tick and start + on_s - now >= HOLD_MIN_S / 2:
             self._hold_pulse = start
         # Until the on-time ends the valve is asked to be open, so a command it missed
-        # is sent again. A hold that starts mid-interval leaves a closed valve closed,
+        # is sent again. Openings that start mid-interval leave a closed valve closed,
         # and an open one open until this interval's share ends.
-        valve_open = now < start + on_s and (open_now or self._hold_pulse == start)
-        return Decision(
-            valve_open,
-            REASON_ROOM_SENSOR_LOST,
-            fallback=FALLBACK_ROOM_SENSOR,
-            fallback_share=on_s / grid.interval_s,  # as rounded to whole valve moves
-        )
+        return now < start + on_s and (open_now or self._hold_pulse == start), on_s
 
     def _decide(self, inp: Inputs, now: float) -> Decision:
         cfg = self.config

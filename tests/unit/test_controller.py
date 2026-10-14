@@ -437,6 +437,24 @@ def test_aim_offset_acts_like_a_target_that_much_higher(offset):
     assert aimed.model == raised.model
 
 
+def test_thermostat_ignores_what_only_the_tickle_reads():
+    plain, given = Zone(), Zone()
+    floor = room = 20.0
+    for minute in range(12 * 60):  # the crude floor of the aim offset test
+        if plain.valve:
+            floor += 0.02 * (35.0 - floor)
+        floor -= 0.01 * (floor - room)
+        room += 0.004 * (floor - room) - 0.001 * (room - 5.0)
+        decision = plain.step(round(room, 1), ret=round(floor, 1))
+        assert decision == given.step(
+            round(room, 1), ret=round(floor, 1), outside=-5.0, calibrate=minute % 2 > 0
+        )
+        assert decision.return_threshold is None
+        assert decision.next_pulse is None
+    assert plain.model.cycles >= 2
+    assert plain.model == given.model
+
+
 def test_same_state_report_does_not_restart_min_open_time():
     zone = Zone()
     zone.step(20.0)  # opens at minute 1
@@ -741,6 +759,35 @@ def test_hold_opens_no_shorter_than_half_the_shortest_opening():
     # The one at minute 90 is seen at minute 100, with 8 minutes left
     assert zone.step(None, minutes=39).valve_open
     assert not zone.step(None, minutes=8).valve_open
+
+
+@pytest.mark.parametrize(("left_s", "opens"), [(150, True), (149, False)])
+def test_hold_opens_at_a_late_grid_point_only_with_half_an_opening_left(left_s, opens):
+    zone = hold_zone()  # opens 18 min, 1080 s, from each grid point
+    zone.step(21.0)
+    zone.step(None)  # minute 2: lost
+    # After a gap in the updates the grid point at minute 45 is seen this late
+    zone.now = 2700 + 1080 - left_s
+    decision = zone.step(None, minutes=0)
+    assert decision.reason == REASON_ROOM_SENSOR_LOST
+    assert decision.valve_open is opens
+
+
+def test_hold_opening_is_granted_for_its_own_interval_only():
+    zone = hold_zone()
+    zone.step(21.0)
+    zone.step(None)  # minute 2: lost
+    assert zone.step(None, minutes=43).valve_open  # minute 45: granted
+    assert not zone.step(None, minutes=18).valve_open  # minute 63: 18 minutes later
+    # After a gap the grid point at minute 90 is seen with 149 s of its 18 minutes
+    # left. Too late to open, and the grant from minute 45 doesn't count for it.
+    zone.now = 5400 + 1080 - 149
+    decision = zone.step(None, minutes=0)
+    assert decision.reason == REASON_ROOM_SENSOR_LOST
+    assert not decision.valve_open
+    assert not zone.step(None).valve_open
+    zone.now = 8100 - 60
+    assert zone.step(None).valve_open  # minute 135: the next grid point
 
 
 @pytest.mark.parametrize(

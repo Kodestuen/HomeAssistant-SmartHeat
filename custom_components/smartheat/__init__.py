@@ -19,18 +19,25 @@ from .const import (
     CONF_MAX_RETURN,
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
+    CONF_OUTSIDE_SENSOR,
+    CONF_PULSE_FLUSH,
+    CONF_PULSE_INTERVAL,
     CONF_ROOM_SENSOR,
     CONF_ROOM_SILENT,
     CONF_SENSOR_TIMEOUT,
+    CONF_STRATEGY,
     CONF_SYSTEM_TYPE,
     DOMAIN,
     INITIAL_OVERSHOOT,
     STORAGE_VERSION,
+    STRATEGY_THERMOSTAT,
+    STRATEGY_TICKLE,
     SYSTEM_UNDERFLOOR,
     default_options,
 )
 from .controller import HOLD_INTERVAL_S, Controller, ControllerConfig, zone_phase
 from .learning import OvershootModel, ZoneCalibration
+from .tickle import TickleConfig, TickleController
 
 PLATFORMS = [Platform.CLIMATE, Platform.SENSOR]
 
@@ -55,6 +62,16 @@ def zone_config(entry: ConfigEntry) -> dict[str, Any]:
     }
 
 
+def zone_strategy(config: dict[str, Any]) -> str:
+    """Return the zone's control method; only underfloor zones run tickle pulses."""
+    if (
+        config[CONF_SYSTEM_TYPE] == SYSTEM_UNDERFLOOR
+        and config.get(CONF_STRATEGY) == STRATEGY_TICKLE
+    ):
+        return STRATEGY_TICKLE
+    return STRATEGY_THERMOSTAT
+
+
 def _store(hass: HomeAssistant, entry: ConfigEntry) -> Store[dict[str, Any]]:
     return Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
 
@@ -63,7 +80,8 @@ def learning_data(controller: Controller) -> dict[str, Any]:
     """Return what a zone has learned, as it is saved.
 
     The calibration sits next to the model's values, so a version that doesn't know it
-    can still read the model.
+    can still read the model. A zone on tickle pulses keeps its return offset and the
+    last outdoor temperature there too.
     """
     data = controller.model.to_dict()
     if controller.calibration is not None:
@@ -80,23 +98,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) ->
     # A floor that loses its room sensor keeps heating by the share its valve was open
     # over the last day. Radiator zones close the valve, as before, and need no share.
     underfloor = config[CONF_SYSTEM_TYPE] == SYSTEM_UNDERFLOOR
-    controller = Controller(
-        ControllerConfig(
-            hysteresis=config[CONF_HYSTERESIS],
-            aim_offset=config[CONF_AIM_OFFSET],
-            min_open_s=config[CONF_MIN_OPEN] * 60,
-            min_closed_s=config[CONF_MIN_CLOSED] * 60,
-            coast_window_s=config[CONF_COAST_WINDOW] * 60,
-            max_return=config[CONF_MAX_RETURN],
-            sensor_timeout_s=config[CONF_SENSOR_TIMEOUT] * 60,
-            frost_temp=config[CONF_FROST_TEMP],
-            lost_room_hold=underfloor,
-            grid_phase_s=zone_phase(entry.entry_id, HOLD_INTERVAL_S),
-            room_silent_s=config.get(CONF_ROOM_SILENT, 0) * 3600 or None,
-        ),
-        model,
-        ZoneCalibration.from_dict(data.get("calibration")) if underfloor else None,
+    calibration = (
+        ZoneCalibration.from_dict(data.get("calibration")) if underfloor else None
     )
+    if zone_strategy(config) == STRATEGY_TICKLE:
+        controller: Controller = _tickle_controller(entry, config, model, calibration)
+    else:
+        controller = Controller(
+            ControllerConfig(
+                hysteresis=config[CONF_HYSTERESIS],
+                aim_offset=config[CONF_AIM_OFFSET],
+                min_open_s=config[CONF_MIN_OPEN] * 60,
+                min_closed_s=config[CONF_MIN_CLOSED] * 60,
+                coast_window_s=config[CONF_COAST_WINDOW] * 60,
+                max_return=config[CONF_MAX_RETURN],
+                sensor_timeout_s=config[CONF_SENSOR_TIMEOUT] * 60,
+                frost_temp=config[CONF_FROST_TEMP],
+                lost_room_hold=underfloor,
+                grid_phase_s=zone_phase(entry.entry_id, HOLD_INTERVAL_S),
+                room_silent_s=config.get(CONF_ROOM_SILENT, 0) * 3600 or None,
+            ),
+            model,
+            calibration,
+        )
     entry.runtime_data = SmartHeatData(controller, store)
     # The zone's device is registered with its entities, so none yet means a new zone
     device_registry = dr.async_get(hass)
@@ -106,6 +130,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) ->
         _async_adopt_room_area(hass, entry, config[CONF_ROOM_SENSOR])
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
+
+
+def _tickle_controller(
+    entry: ConfigEntry,
+    config: dict[str, Any],
+    model: OvershootModel,
+    calibration: ZoneCalibration | None,
+) -> TickleController:
+    """Return the controller of an underfloor zone on tickle pulses.
+
+    Of the thermostat's settings it uses the maximum return temperature, the room
+    sensor silent time, and for frost protection the frost temperature, hysteresis
+    and minimum open time. It keeps the thermostat's model as it was learned: at its
+    first step it starts the return offset from the model's h, if it has no offset
+    saved yet.
+    """
+    interval_s = config[CONF_PULSE_INTERVAL] * 60
+    return TickleController(
+        TickleConfig(
+            hysteresis=config[CONF_HYSTERESIS],
+            min_open_s=config[CONF_MIN_OPEN] * 60,
+            max_return=config[CONF_MAX_RETURN],
+            frost_temp=config[CONF_FROST_TEMP],
+            hold_interval_s=interval_s,
+            grid_phase_s=zone_phase(entry.entry_id, interval_s),
+            room_silent_s=config.get(CONF_ROOM_SILENT, 0) * 3600 or None,
+            flush_s=config[CONF_PULSE_FLUSH] * 60,
+            has_outside_sensor=bool(config.get(CONF_OUTSIDE_SENSOR)),
+        ),
+        model,
+        calibration,
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SmartHeatConfigEntry) -> bool:

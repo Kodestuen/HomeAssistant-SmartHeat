@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from functools import partial
 import logging
 import math
 from typing import Any
@@ -19,6 +18,11 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
+from homeassistant.components.weather import (
+    ATTR_WEATHER_TEMPERATURE,
+    ATTR_WEATHER_TEMPERATURE_UNIT,
+    DOMAIN as WEATHER_DOMAIN,
+)
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
@@ -27,6 +31,7 @@ from homeassistant.const import (
     SERVICE_TURN_ON,
     STATE_OFF,
     STATE_ON,
+    STATE_UNAVAILABLE,
     UnitOfTemperature,
 )
 from homeassistant.core import (
@@ -50,8 +55,9 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from . import SmartHeatConfigEntry, learning_data, zone_config
+from . import SmartHeatConfigEntry, learning_data, zone_config, zone_strategy
 from .const import (
+    ATTR_OUTSIDE_SENSOR_ENTITY_ID,
     ATTR_RETURN_SENSOR_ENTITY_ID,
     ATTR_ROOM_SENSOR_ENTITY_ID,
     ATTR_SUPPLY_SENSOR_ENTITY_ID,
@@ -70,10 +76,14 @@ from .const import (
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
     CONF_MIN_TEMP,
+    CONF_OUTSIDE_SENSOR,
+    CONF_PULSE_FLUSH,
+    CONF_PULSE_INTERVAL,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
     CONF_ROOM_SILENT,
     CONF_SENSOR_TIMEOUT,
+    CONF_STRATEGY,
     CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
     CONF_VALVE,
@@ -85,6 +95,7 @@ from .const import (
 )
 from .controller import Inputs
 from .entity import SmartHeatEntity
+from .tickle import TickleController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +105,11 @@ COMMAND_RETRY_S = 60.0  # resend a command the valve hasn't followed after this 
 SAVE_DELAY_S = 10.0
 CALIBRATION_SAVE_S = 1800.0  # a calibration that changed alone is saved this seldom
 ATTR_COMFORT_TEMPERATURE = "comfort_temperature"
+# What tickle pulses show. The recorder skips these: the return target has its own
+# sensor, the outdoor temperature its own entity, and pulse times follow a fixed grid.
+ATTR_RETURN_THRESHOLD = "return_threshold"
+ATTR_NEXT_PULSE = "next_pulse"
+ATTR_OUTSIDE_TEMPERATURE = "outside_temperature"
 VALVE_STATES = {"open": True, "opening": True, "closed": False, "closing": False}
 # Tuning options that are also attributes, under their option keys
 TUNING_ATTRIBUTES = (
@@ -109,7 +125,7 @@ TUNING_ATTRIBUTES = (
     CONF_FROST_TEMP,
 )
 # The same, for the options only underfloor zones have
-UNDERFLOOR_TUNING_ATTRIBUTES = (CONF_ROOM_SILENT,)
+UNDERFLOOR_TUNING_ATTRIBUTES = (CONF_ROOM_SILENT, CONF_PULSE_INTERVAL, CONF_PULSE_FLUSH)
 # Helpers that may write their state only when one of their sources changes, so a
 # steady room temperature from them would look like a silent sensor
 SILENT_HELPER_PLATFORMS = frozenset(
@@ -142,6 +158,19 @@ def _round(value: float | None, digits: int = 2) -> float | None:
     return None if value is None else round(value, digits)
 
 
+def _celsius(value: Any, unit: str | None) -> float | None:
+    """Return a temperature in °C, or None if it isn't a number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if unit in (UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.KELVIN):
+        number = TemperatureConverter.convert(number, unit, UnitOfTemperature.CELSIUS)
+    return number
+
+
 class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
     """Thermostat that opens and closes the zone's valve."""
 
@@ -161,14 +190,19 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
     _unrecorded_attributes = frozenset(
         {
             ATTR_SYSTEM_TYPE,
+            CONF_STRATEGY,
             ATTR_VALVE_ENTITY_ID,
             ATTR_ROOM_SENSOR_ENTITY_ID,
             ATTR_RETURN_SENSOR_ENTITY_ID,
             ATTR_SUPPLY_SENSOR_ENTITY_ID,
             ATTR_WINDOW_SENSOR_ENTITY_ID,
+            ATTR_OUTSIDE_SENSOR_ENTITY_ID,
             CONF_INVERT_VALVE,
             *TUNING_ATTRIBUTES,
             *UNDERFLOOR_TUNING_ATTRIBUTES,
+            ATTR_RETURN_THRESHOLD,
+            ATTR_NEXT_PULSE,
+            ATTR_OUTSIDE_TEMPERATURE,
         }
     )
 
@@ -185,6 +219,10 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         self._return_sensor: str | None = config.get(CONF_RETURN_SENSOR)
         self._supply_sensor: str | None = config.get(CONF_SUPPLY_SENSOR)
         self._window_sensor: str | None = config.get(CONF_WINDOW_SENSOR)
+        # Only underfloor zones have one; only tickle pulses use it
+        self._outside_sensor: str | None = (
+            config.get(CONF_OUTSIDE_SENSOR) if self._underfloor else None
+        )
         self._invert: bool = config[CONF_INVERT_VALVE]
         self._preset_temperatures = {
             PRESET_ECO: config[CONF_ECO_TEMP],
@@ -196,6 +234,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         # Built once: changing the options reloads the zone
         self._config_attributes: dict[str, Any] = {
             ATTR_SYSTEM_TYPE: config[CONF_SYSTEM_TYPE],
+            CONF_STRATEGY: zone_strategy(config),
             ATTR_VALVE_ENTITY_ID: self._valve,
             ATTR_ROOM_SENSOR_ENTITY_ID: self._room_sensor,
             ATTR_RETURN_SENSOR_ENTITY_ID: self._return_sensor or None,
@@ -204,6 +243,10 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             CONF_INVERT_VALVE: self._invert,
             **{key: config[key] for key in tuning},
         }
+        if self._underfloor:
+            self._config_attributes[ATTR_OUTSIDE_SENSOR_ENTITY_ID] = (
+                self._outside_sensor or None
+            )
         self._attr_hvac_mode = HVACMode.HEAT
         self._attr_preset_mode = PRESET_NONE
         self._comfort_temperature = DEFAULT_TARGET
@@ -215,7 +258,8 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         self._lock = asyncio.Lock()
         self._last_command: tuple[bool, float] | None = None
         self._saved_revisions = self._learning_revisions()
-        self._saved_at: float | None = None
+        self._saved_at: float | None = None  # when the store last wrote
+        self._save_waiting = False  # a write is waiting in the store
         self._removed = False
 
     @property
@@ -260,6 +304,24 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             "coasting": controller.coasting,
             "return_temperature": self._return,
         }
+        if isinstance(controller, TickleController):
+            next_pulse = decision.next_pulse if decision else None
+            attributes.update(
+                {
+                    # The return temperature that ends a pulse; null while none is used
+                    ATTR_RETURN_THRESHOLD: _round(
+                        decision.return_threshold if decision else None
+                    ),
+                    ATTR_NEXT_PULSE: (
+                        None
+                        if next_pulse is None
+                        else dt_util.utc_from_timestamp(next_pulse).isoformat()
+                    ),
+                    # A reading, or the last one for up to 48 hours
+                    ATTR_OUTSIDE_TEMPERATURE: _round(controller.outside_temperature),
+                    "calibrating": controller.calibrating,
+                }
+            )
         if self._underfloor:
             attributes["room_silent"] = controller.room_silent
         if self._supply_sensor:
@@ -296,6 +358,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
                 self._return_sensor,
                 self._supply_sensor,
                 self._window_sensor,
+                self._outside_sensor,
             )
             if entity_id
         ]
@@ -344,9 +407,14 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         await self._async_control()
 
     async def async_reset_learning(self) -> None:
-        """Forget the overshoot learned for this zone; the valve's open share stays."""
+        """Forget what the zone's control method learned, and save that soon.
+
+        The thermostat forgets its overshoot model. Tickle pulses start their return
+        offset afresh from the model's h, and keep the model. The valve's open share
+        stays in both.
+        """
         self._controller.reset_learning()
-        await self._async_control()
+        await self._async_control(save_soon=True)
 
     async def _async_started(self, hass: HomeAssistant) -> None:
         await self._async_control()
@@ -358,7 +426,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
     def _async_state_changed(self, event: Event[EventStateChangedData]) -> None:
         self.hass.async_create_task(self._async_control())
 
-    async def _async_control(self) -> None:
+    async def _async_control(self, save_soon: bool = False) -> None:
         """Read the inputs, let the controller decide and move the valve."""
         if self._removed:
             return
@@ -371,7 +439,7 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
                 and decision.valve_open != inputs.valve_open
             ):
                 await self._async_command_valve(decision.valve_open, now)
-            self._save_learning(now)
+            self._save_learning(now, save_soon)
         if self._removed:
             return
         self.async_write_ha_state()
@@ -393,6 +461,9 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             valve_open=valve_open,
             valve_changed_at=valve_changed_at,
             room_updated_at=self._room_reported_at(),
+            outside=self._outside_temperature(),
+            # Tickle pulses calibrate only at the targets a room is held at for long
+            calibrate=self._attr_preset_mode in (PRESET_NONE, PRESET_ECO),
         )
 
     def _room_reported_at(self) -> float | None:
@@ -410,16 +481,22 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
         """Return a sensor's temperature in °C, or None if it has none."""
         if entity_id is None or (state := self.hass.states.get(entity_id)) is None:
             return None
-        try:
-            value = float(state.state)
-        except ValueError:
+        return _celsius(state.state, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
+
+    def _outside_temperature(self) -> float | None:
+        """Return the outdoor temperature in °C: a sensor's, or a weather entity's."""
+        entity_id = self._outside_sensor
+        if entity_id is None or split_entity_id(entity_id)[0] != WEATHER_DOMAIN:
+            return self._temperature(entity_id)
+        if (state := self.hass.states.get(entity_id)) is None:
             return None
-        if not math.isfinite(value):
+        if state.state == STATE_UNAVAILABLE:
             return None
-        unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        if unit in (UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.KELVIN):
-            value = TemperatureConverter.convert(value, unit, UnitOfTemperature.CELSIUS)
-        return value
+        # In the unit the weather entity shows, which follows the unit system
+        return _celsius(
+            state.attributes.get(ATTR_WEATHER_TEMPERATURE),
+            state.attributes.get(ATTR_WEATHER_TEMPERATURE_UNIT),
+        )
 
     def _valve_state(self) -> tuple[bool | None, float | None]:
         """Return whether water flows, and since when; None if unknown."""
@@ -461,20 +538,34 @@ class SmartHeatClimate(SmartHeatEntity, ClimateEntity, RestoreEntity):
             None if calibration is None else calibration.revision,
         )
 
-    def _save_learning(self, now: float) -> None:
-        """Save soon after the model learns; a calibration change alone can wait."""
+    def _save_learning(self, now: float, soon: bool = False) -> None:
+        """Save soon after the model learns; a calibration change alone can wait.
+
+        A calibration change within half an hour of the last write is written at the
+        end of that half hour. Until then the store holds it, and it also writes it
+        when Home Assistant stops.
+        """
         revisions = self._learning_revisions()
         if revisions == self._saved_revisions:
             return
-        if (
-            revisions[0] == self._saved_revisions[0]
-            and self._saved_at is not None
-            and 0 <= now - self._saved_at < CALIBRATION_SAVE_S
-        ):
-            # The store restarts its delay on every call, so wait here instead
-            return
+        calibration_only = not soon and revisions[0] == self._saved_revisions[0]
         self._saved_revisions = revisions
-        self._saved_at = now
-        self._store.async_delay_save(
-            partial(learning_data, self._controller), SAVE_DELAY_S
-        )
+        if calibration_only and self._save_waiting:
+            return  # the write waiting in the store takes this change along
+        since = None if self._saved_at is None else now - self._saved_at
+        if calibration_only and since is not None and 0 <= since < CALIBRATION_SAVE_S:
+            # Written at the end of the half hour. Asked for only while no write
+            # waits, as the store would put a waiting write off until then too.
+            self._delay_save(CALIBRATION_SAVE_S - since)
+        else:
+            self._delay_save(SAVE_DELAY_S)
+
+    def _delay_save(self, delay: float) -> None:
+        self._save_waiting = True
+        self._store.async_delay_save(self._data_to_save, delay)
+
+    def _data_to_save(self) -> dict[str, Any]:
+        """Return what the zone has learned; the store calls this as it writes."""
+        self._save_waiting = False
+        self._saved_at = dt_util.utcnow().timestamp()
+        return learning_data(self._controller)

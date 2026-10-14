@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Tilføj en SmartHeat-zone",
-        "description": "SmartHeat åbner og lukker en on/off-ventil for én varmezone. Den lærer, hvor meget rummet bliver ved med at blive varmere, efter ventilen er lukket, og lukker så meget tidligere.",
+        "description": "SmartHeat åbner og lukker en on/off-ventil for én varmezone. Den lærer, hvor meget rummet bliver ved med at blive varmere, efter ventilen er lukket, og lukker så meget tidligere. Gulvvarmezoner kan senere skifte til de eksperimentelle korte pulser under Konfigurer.",
         "data": {
           "name": "Navn",
           "system_type": "Varmesystem",
@@ -26,7 +26,8 @@
     },
     "error": {
       "same_sensor": "Rumføler og returføler skal være to forskellige enheder.",
-      "return_required": "Gulvvarme kræver en returtemperaturføler."
+      "return_required": "Gulvvarme kræver en returtemperaturføler.",
+      "return_shared": "En anden SmartHeat-zone bruger den samme returføler. To termostatzoner må gerne dele en, men en zone med korte pulser kræver en returføler på sin egen kreds."
     },
     "abort": {
       "already_configured": "Denne ventil bruges allerede af en SmartHeat-zone."
@@ -42,6 +43,8 @@
           "return_sensor": "Returtemperaturføler",
           "supply_sensor": "Fremløbstemperaturføler",
           "window_sensor": "Vindues- eller dørføler",
+          "outside_sensor": "Udetemperatur",
+          "strategy": "Styringsmetode",
           "invert_valve": "Omvendt ventil",
           "min_temp": "Laveste temperatur",
           "max_temp": "Højeste temperatur",
@@ -55,26 +58,36 @@
           "coast_window_minutes": "Efterløbsvindue",
           "max_return_temp": "Højeste returtemperatur",
           "sensor_timeout_minutes": "Timeout for rumføler",
-          "room_sensor_silent_hours": "Rumføler tavs efter"
+          "room_sensor_silent_hours": "Rumføler tavs efter",
+          "pulse_interval_minutes": "Pulsinterval",
+          "pulse_flush_minutes": "Korteste puls"
         },
         "data_description": {
           "return_sensor": "Nødvendig ved gulvvarme, valgfri ved radiatorer.",
+          "outside_sensor": "Valgfri, bruges af korte pulser: en temperaturføler udenfor eller en vejrenhed. Returmålet følger så vejret. Den seneste måling bruges i op til 48 timer.",
+          "strategy": "Termostaten lukker ventilen tidligt med det oversving, den har lært. Korte pulser (eksperimentel) åbner ventilen kort ad gangen efter en fast plan og lukker den igen, når returvandet er varmt nok. De kræver en hurtig returføler på kredsens eget returrør. Kør først en uge med termostaten: pulserne starter ud fra det, den har lært.",
           "invert_valve": "Slå til for en normalt åben aktuator, hvor tænd lukker ventilen.",
           "frost_temp": "Ventilen åbner under denne temperatur, også når zonen er slukket.",
-          "hysteresis": "Ventilen åbner, når rummet er så meget under måltemperaturen.",
+          "hysteresis": "Termostat; også frostsikring. Ventilen åbner, når rummet er så meget under måltemperaturen.",
           "aim_offset": "Termostaten sigter så meget over måltemperaturen, eller under den ved et negativt tal, når den åbner, lukker og lærer. Et rum, der topper ved måltemperaturen, er i gennemsnit lidt koldere end den; med +0,15 °C rammer en typisk gulvvarmezone den i gennemsnit. Den viste måltemperatur ændres ikke.",
-          "min_open_minutes": "Termiske aktuatorer skal bruge et par minutter på at åbne helt.",
-          "coast_window_minutes": "Hvor længe der ventes på, at rummet topper efter en tidlig lukning.",
+          "min_open_minutes": "Termostat; også frostsikring. Termiske aktuatorer skal bruge et par minutter på at åbne helt.",
+          "min_closed_minutes": "Kun termostat. Ventilen holdes lukket mindst så længe.",
+          "coast_window_minutes": "Kun termostat. Hvor længe der ventes på, at rummet topper efter en tidlig lukning.",
           "max_return_temp": "Ventilen lukker over denne temperatur, fx for at beskytte gulvet. Bruges kun med en returføler.",
-          "sensor_timeout_minutes": "Når rumføleren har været utilgængelig så længe, holder en gulvvarmezone ventilen åben lige så stor en del af tiden som i det seneste døgn. En radiatorzone lukker ventilen.",
-          "room_sensor_silent_hours": "Har rumføleren ikke sendt en ny måling så længe, regnes den for tabt. 0 slår det fra. Hjælpere som skabelonsensorer kontrolleres ikke. Nogle integrationer, fx MQTT, sender kun en måling, når den ændrer sig: hæv tiden for en føler med grove trin."
+          "sensor_timeout_minutes": "Kun termostat. Når rumføleren har været utilgængelig så længe, holder en gulvvarmezone ventilen åben lige så stor en del af tiden som i det seneste døgn. En radiatorzone lukker ventilen. Korte pulser fortsætter uden rumføleren efter 2 minutter.",
+          "room_sensor_silent_hours": "Har rumføleren ikke sendt en ny måling så længe, regnes den for tabt. 0 slår det fra. Hjælpere som skabelonsensorer kontrolleres ikke. Nogle integrationer, fx MQTT, sender kun en måling, når den ændrer sig: hæv tiden for en føler med grove trin.",
+          "pulse_interval_minutes": "Kun korte pulser. Så ofte kan en puls starte. 30 minutter giver omkring 40 % flere ventilbevægelser for en lille gevinst; 60 minutter omkring 30 % færre, mod lidt større afvigelse.",
+          "pulse_flush_minutes": "Kun korte pulser. Den korteste tid, ventilen er åben. Sæt den til mindst den tid, aktuatoren skal bruge på at åbne, plus den tid, det varme vand er om at nå returføleren. Højst pulsintervallet minus 15 minutter."
         }
       }
     },
     "error": {
       "same_sensor": "Rumføler og returføler skal være to forskellige enheder.",
       "return_required": "Gulvvarme kræver en returtemperaturføler.",
-      "min_above_max": "Laveste temperatur skal være under højeste temperatur."
+      "min_above_max": "Laveste temperatur skal være under højeste temperatur.",
+      "flush_too_long": "Den korteste puls skal være mindst 15 minutter kortere end pulsintervallet.",
+      "outside_same_sensor": "Udetemperaturen skal komme fra en anden enhed end rum- og returføleren.",
+      "return_shared": "En anden SmartHeat-zone bruger den samme returføler. To termostatzoner må gerne dele en, men en zone med korte pulser kræver en returføler på sin egen kreds."
     },
     "abort": {
       "already_configured": "Denne ventil bruges allerede af en anden SmartHeat-zone."
@@ -85,6 +98,12 @@
       "options": {
         "underfloor": "Gulvvarme",
         "radiator": "Radiatorer"
+      }
+    },
+    "strategy": {
+      "options": {
+        "thermostat": "Termostat, der lukker tidligt",
+        "tickle": "Korte pulser (eksperimentel)"
       }
     }
   },
@@ -117,13 +136,23 @@
               "max_return_temp": "Vandet er for varmt",
               "room_sensor_unavailable": "Venter på rumføler",
               "room_sensor_lost": "Rumføler mistet",
-              "frost_protection": "Frostsikring"
+              "return_sensor_unavailable": "Venter på returføler",
+              "frost_protection": "Frostsikring",
+              "pulse_flush": "Puls: fylder kredsen",
+              "pulse": "Puls: varmer til returmålet",
+              "pulse_extended": "Puls forlænget",
+              "return_reached": "Returmål nået",
+              "pulse_skipped": "Puls sprunget over: varm nok",
+              "waiting": "Venter på næste puls",
+              "timed_pulse": "Tidsstyret puls"
             }
           },
           "fallback": {
             "name": "Nøddrift",
             "state": {
-              "room_sensor": "Uden rumføler"
+              "room_sensor": "Uden rumføler",
+              "return_sensor": "Uden returføler",
+              "sensors": "Uden rum- og returføler"
             }
           },
           "fallback_duty": {
@@ -159,6 +188,22 @@
           "return_temperature": {
             "name": "Returtemperatur"
           },
+          "return_threshold": {
+            "name": "Returmål"
+          },
+          "next_pulse": {
+            "name": "Næste puls"
+          },
+          "outside_temperature": {
+            "name": "Udetemperatur"
+          },
+          "calibrating": {
+            "name": "Kalibrerer",
+            "state": {
+              "true": "Ja",
+              "false": "Nej"
+            }
+          },
           "supply_temperature": {
             "name": "Fremløbstemperatur"
           },
@@ -186,6 +231,13 @@
               "radiator": "Radiatorer"
             }
           },
+          "strategy": {
+            "name": "Styringsmetode",
+            "state": {
+              "thermostat": "Termostat, der lukker tidligt",
+              "tickle": "Korte pulser (eksperimentel)"
+            }
+          },
           "valve_entity_id": {
             "name": "Ventil"
           },
@@ -200,6 +252,9 @@
           },
           "window_sensor_entity_id": {
             "name": "Vindues- eller dørføler"
+          },
+          "outside_sensor_entity_id": {
+            "name": "Kilde til udetemperatur"
           },
           "invert_valve": {
             "name": "Omvendt ventil",
@@ -231,6 +286,12 @@
           },
           "room_sensor_silent_hours": {
             "name": "Rumføler tavs efter"
+          },
+          "pulse_interval_minutes": {
+            "name": "Pulsinterval"
+          },
+          "pulse_flush_minutes": {
+            "name": "Korteste puls"
           },
           "eco_temp": {
             "name": "Eco-temperatur"
@@ -268,13 +329,19 @@
       },
       "supply_return_difference": {
         "name": "Forskel fremløb-retur"
+      },
+      "return_offset": {
+        "name": "Returforskydning"
+      },
+      "return_target": {
+        "name": "Returmål"
       }
     }
   },
   "services": {
     "reset_learning": {
       "name": "Nulstil læring",
-      "description": "Glemmer det oversving, SmartHeat har lært for denne zone, og starter forfra fra standardværdierne. Hvor længe ventilen var åben i det seneste døgn, som bruges, hvis rumføleren tabes, beholdes."
+      "description": "Zoner med termostat glemmer det oversving, SmartHeat har lært, og starter forfra fra standardværdierne. Zoner med korte pulser starter deres returforskydning forfra ud fra den holdedifference, termostaten har lært, og beholder termostatens model. Alle zoner beholder, hvor længe ventilen var åben i det seneste døgn, som de har brug for, hvis en føler tabes."
     }
   }
 }

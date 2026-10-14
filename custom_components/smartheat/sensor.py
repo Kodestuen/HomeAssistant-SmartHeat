@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from homeassistant.components.sensor import (
     DOMAIN as SENSOR_DOMAIN,
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
@@ -18,8 +19,14 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from . import SmartHeatConfigEntry, zone_config
-from .const import CONF_RETURN_SENSOR, CONF_SUPPLY_SENSOR, DOMAIN, SIGNAL_UPDATE
+from . import SmartHeatConfigEntry, zone_config, zone_strategy
+from .const import (
+    CONF_RETURN_SENSOR,
+    CONF_SUPPLY_SENSOR,
+    DOMAIN,
+    SIGNAL_UPDATE,
+    STRATEGY_TICKLE,
+)
 from .controller import Controller
 from .entity import SmartHeatEntity
 
@@ -31,6 +38,7 @@ class SmartHeatSensorDescription(SensorEntityDescription):
     value_fn: Callable[[Controller, float], float | None]
     needs_supply: bool = False
     needs_return: bool = False
+    tickle: bool = False  # only zones on tickle pulses have it
 
 
 SENSORS: tuple[SmartHeatSensorDescription, ...] = (
@@ -99,6 +107,27 @@ SENSORS: tuple[SmartHeatSensorDescription, ...] = (
         needs_return=True,
         value_fn=lambda c, now: c.supply_return_delta,
     ),
+    # c and T of the tickle pulses (a TickleController)
+    SmartHeatSensorDescription(
+        key="return_offset",
+        translation_key="return_offset",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        tickle=True,
+        value_fn=lambda c, now: c.return_offset,
+    ),
+    SmartHeatSensorDescription(
+        key="return_target",
+        translation_key="return_target",
+        # A water temperature, unlike the differences learned here
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        tickle=True,
+        value_fn=lambda c, now: c.return_target,
+    ),
 )
 
 
@@ -111,18 +140,22 @@ async def async_setup_entry(
     config = zone_config(entry)
     has_supply = bool(config.get(CONF_SUPPLY_SENSOR))
     has_return = bool(config.get(CONF_RETURN_SENSOR))
+    tickle = zone_strategy(config) == STRATEGY_TICKLE
     entity_registry = er.async_get(hass)
     provided: list[SmartHeatSensorDescription] = []
     for description in SENSORS:
-        if (has_supply or not description.needs_supply) and (
-            has_return or not description.needs_return
+        if (
+            (has_supply or not description.needs_supply)
+            and (has_return or not description.needs_return)
+            and (tickle or not description.tickle)
         ):
             provided.append(description)
         elif entity_id := entity_registry.async_get_entity_id(
             SENSOR_DOMAIN, DOMAIN, f"{entry.entry_id}_{description.key}"
         ):
-            # The supply or return sensor it needs was removed from the zone: remove
-            # the entity too, or it would linger as unavailable
+            # The supply or return sensor it needs was removed from the zone, or the
+            # zone went back to the thermostat: remove the entity too, or it would
+            # linger as unavailable
             entity_registry.async_remove(entity_id)
     async_add_entities(SmartHeatSensor(entry, description) for description in provided)
 

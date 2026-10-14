@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add a SmartHeat zone",
-        "description": "SmartHeat opens and closes an on/off valve for one heating zone. It learns how far the room keeps warming after the valve closes, and closes early by that much.",
+        "description": "SmartHeat opens and closes an on/off valve for one heating zone. It learns how far the room keeps warming after the valve closes, and closes early by that much. Underfloor zones can switch to the experimental tickle pulses later, under Configure.",
         "data": {
           "name": "Name",
           "system_type": "Heating system",
@@ -26,7 +26,8 @@
     },
     "error": {
       "same_sensor": "The room and return sensors must be different entities.",
-      "return_required": "Underfloor heating needs a return temperature sensor."
+      "return_required": "Underfloor heating needs a return temperature sensor.",
+      "return_shared": "Another SmartHeat zone uses the same return sensor. Two thermostat zones may share one, but a zone on tickle pulses needs a return sensor on its own loop."
     },
     "abort": {
       "already_configured": "This valve is already used by a SmartHeat zone."
@@ -42,6 +43,8 @@
           "return_sensor": "Return temperature sensor",
           "supply_sensor": "Supply temperature sensor",
           "window_sensor": "Window or door sensor",
+          "outside_sensor": "Outdoor temperature",
+          "strategy": "Control method",
           "invert_valve": "Inverted valve",
           "min_temp": "Minimum temperature",
           "max_temp": "Maximum temperature",
@@ -55,26 +58,36 @@
           "coast_window_minutes": "Coast window",
           "max_return_temp": "Maximum return temperature",
           "sensor_timeout_minutes": "Room sensor timeout",
-          "room_sensor_silent_hours": "Room sensor silent after"
+          "room_sensor_silent_hours": "Room sensor silent after",
+          "pulse_interval_minutes": "Pulse interval",
+          "pulse_flush_minutes": "Minimum pulse"
         },
         "data_description": {
           "return_sensor": "Needed for underfloor heating, optional for radiators.",
+          "outside_sensor": "Optional, used by tickle pulses: a temperature sensor outdoors, or a weather entity. The return target then follows the weather. The last reading is used for up to 48 hours.",
+          "strategy": "The thermostat closes the valve early by the overshoot it has learned. Tickle pulses (experimental) open the valve for short pulses on a fixed schedule, and end each pulse when the return water is warm enough. They need a fast return sensor on this loop's own return pipe. Run the thermostat for a week first: the pulses start from what it has learned.",
           "invert_valve": "Turn on for a normally open actuator, where switching on closes the valve.",
           "frost_temp": "The valve opens below this temperature, even when the zone is off.",
-          "hysteresis": "The valve opens when the room is this much below the target.",
+          "hysteresis": "Thermostat; also frost protection. The valve opens when the room is this much below the target.",
           "aim_offset": "The thermostat aims this much above the target, or below it if negative, when it opens, closes and learns. A room that peaks at the target sits a little below it on average, so +0.15 °C centres a typical underfloor zone. The target shown doesn't change.",
-          "min_open_minutes": "Thermal actuators need a few minutes to open fully.",
-          "coast_window_minutes": "How long to wait for the room to peak after an early close.",
+          "min_open_minutes": "Thermostat; also frost protection. Thermal actuators need a few minutes to open fully.",
+          "min_closed_minutes": "Thermostat only. The valve stays closed at least this long.",
+          "coast_window_minutes": "Thermostat only. How long to wait for the room to peak after an early close.",
           "max_return_temp": "The valve closes above this, for example to protect the floor. Only used with a return sensor.",
-          "sensor_timeout_minutes": "When the room sensor has been unavailable this long, an underfloor zone keeps the valve open for the same share of the time as over the last day. A radiator zone closes the valve.",
-          "room_sensor_silent_hours": "After this long without a new reading, the room sensor counts as lost. 0 turns this off. Helpers such as template sensors are not checked. Some integrations, such as MQTT, only send a reading when it changes: raise this for a sensor with coarse steps."
+          "sensor_timeout_minutes": "Thermostat only. When the room sensor has been unavailable this long, an underfloor zone keeps the valve open for the same share of the time as over the last day. A radiator zone closes the valve. Tickle pulses carry on without the room sensor after 2 minutes.",
+          "room_sensor_silent_hours": "After this long without a new reading, the room sensor counts as lost. 0 turns this off. Helpers such as template sensors are not checked. Some integrations, such as MQTT, only send a reading when it changes: raise this for a sensor with coarse steps.",
+          "pulse_interval_minutes": "Tickle pulses only. A pulse can start this often. 30 minutes means about 40 % more valve movements for little gain; 60 minutes about 30 % fewer, for a little more deviation.",
+          "pulse_flush_minutes": "Tickle pulses only. The shortest time the valve stays open. Set it to at least the time the actuator takes to open plus the time hot water takes to reach the return sensor. At most the pulse interval minus 15 minutes."
         }
       }
     },
     "error": {
       "same_sensor": "The room and return sensors must be different entities.",
       "return_required": "Underfloor heating needs a return temperature sensor.",
-      "min_above_max": "The minimum temperature must be below the maximum."
+      "min_above_max": "The minimum temperature must be below the maximum.",
+      "flush_too_long": "The minimum pulse must be at least 15 minutes shorter than the pulse interval.",
+      "outside_same_sensor": "The outdoor temperature must come from another entity than the room and return sensors.",
+      "return_shared": "Another SmartHeat zone uses the same return sensor. Two thermostat zones may share one, but a zone on tickle pulses needs a return sensor on its own loop."
     },
     "abort": {
       "already_configured": "This valve is already used by another SmartHeat zone."
@@ -85,6 +98,12 @@
       "options": {
         "underfloor": "Underfloor heating",
         "radiator": "Radiators"
+      }
+    },
+    "strategy": {
+      "options": {
+        "thermostat": "Thermostat that closes early",
+        "tickle": "Tickle pulses (experimental)"
       }
     }
   },
@@ -117,13 +136,23 @@
               "max_return_temp": "Water too hot",
               "room_sensor_unavailable": "Waiting for room sensor",
               "room_sensor_lost": "Room sensor lost",
-              "frost_protection": "Frost protection"
+              "return_sensor_unavailable": "Waiting for return sensor",
+              "frost_protection": "Frost protection",
+              "pulse_flush": "Pulse: filling the loop",
+              "pulse": "Pulse: heating to the return target",
+              "pulse_extended": "Pulse extended",
+              "return_reached": "Return target reached",
+              "pulse_skipped": "Pulse skipped: warm enough",
+              "waiting": "Waiting for the next pulse",
+              "timed_pulse": "Timed pulse"
             }
           },
           "fallback": {
             "name": "Fallback",
             "state": {
-              "room_sensor": "Without room sensor"
+              "room_sensor": "Without room sensor",
+              "return_sensor": "Without return sensor",
+              "sensors": "Without room and return sensors"
             }
           },
           "fallback_duty": {
@@ -159,6 +188,22 @@
           "return_temperature": {
             "name": "Return temperature"
           },
+          "return_threshold": {
+            "name": "Return target"
+          },
+          "next_pulse": {
+            "name": "Next pulse"
+          },
+          "outside_temperature": {
+            "name": "Outdoor temperature"
+          },
+          "calibrating": {
+            "name": "Calibrating",
+            "state": {
+              "true": "Yes",
+              "false": "No"
+            }
+          },
           "supply_temperature": {
             "name": "Supply temperature"
           },
@@ -186,6 +231,13 @@
               "radiator": "Radiators"
             }
           },
+          "strategy": {
+            "name": "Control method",
+            "state": {
+              "thermostat": "Thermostat that closes early",
+              "tickle": "Tickle pulses (experimental)"
+            }
+          },
           "valve_entity_id": {
             "name": "Valve"
           },
@@ -200,6 +252,9 @@
           },
           "window_sensor_entity_id": {
             "name": "Window or door sensor"
+          },
+          "outside_sensor_entity_id": {
+            "name": "Outdoor temperature source"
           },
           "invert_valve": {
             "name": "Inverted valve",
@@ -231,6 +286,12 @@
           },
           "room_sensor_silent_hours": {
             "name": "Room sensor silent after"
+          },
+          "pulse_interval_minutes": {
+            "name": "Pulse interval"
+          },
+          "pulse_flush_minutes": {
+            "name": "Minimum pulse"
           },
           "eco_temp": {
             "name": "Eco temperature"
@@ -268,13 +329,19 @@
       },
       "supply_return_difference": {
         "name": "Supply-return difference"
+      },
+      "return_offset": {
+        "name": "Return offset"
+      },
+      "return_target": {
+        "name": "Return target"
       }
     }
   },
   "services": {
     "reset_learning": {
       "name": "Reset learning",
-      "description": "Forgets the overshoot SmartHeat has learned for this zone and starts again from the defaults. How long the valve was open over the last day, used when the room sensor is lost, is kept."
+      "description": "Thermostat zones forget the overshoot SmartHeat has learned and start again from the defaults. Zones on tickle pulses start their return offset afresh from the holding difference the thermostat learned, and keep the thermostat's model. Every zone keeps how long its valve was open over the last day, which it needs when a sensor is lost."
     }
   }
 }

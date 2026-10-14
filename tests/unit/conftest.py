@@ -2,7 +2,7 @@
 
 Importing custom_components.smartheat would run its __init__.py, which needs Home
 Assistant. Registering the folder as a bare package called smartheat_core lets the
-tests import controller.py and learning.py directly.
+tests import controller.py, tickle.py and learning.py directly.
 """
 
 import pathlib

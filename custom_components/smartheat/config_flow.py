@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import voluptuous as vol
@@ -13,10 +14,10 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import CONF_NAME, UnitOfTemperature, UnitOfTime
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import selector
 
-from . import zone_config
+from . import zone_config, zone_strategy
 from .const import (
     CONF_AIM_OFFSET,
     CONF_AWAY_TEMP,
@@ -30,15 +31,21 @@ from .const import (
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
     CONF_MIN_TEMP,
+    CONF_OUTSIDE_SENSOR,
+    CONF_PULSE_FLUSH,
+    CONF_PULSE_INTERVAL,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
     CONF_ROOM_SILENT,
     CONF_SENSOR_TIMEOUT,
+    CONF_STRATEGY,
     CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
     CONF_VALVE,
     CONF_WINDOW_SENSOR,
     DOMAIN,
+    STRATEGIES,
+    STRATEGY_TICKLE,
     SYSTEM_TYPES,
     SYSTEM_UNDERFLOOR,
     default_options,
@@ -47,6 +54,17 @@ from .const import (
 TEMPERATURE_SENSOR = selector.EntitySelector(
     selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
 )
+OUTSIDE_SENSOR = selector.EntitySelector(
+    selector.EntitySelectorConfig(
+        filter=[
+            selector.EntityFilterSelectorConfig(
+                domain="sensor", device_class="temperature"
+            ),
+            selector.EntityFilterSelectorConfig(domain="weather"),
+        ]
+    )
+)
+FLUSH_GAP = 15  # minutes a pulse interval leaves at least after the minimum pulse
 
 
 def _number(
@@ -112,17 +130,57 @@ OPTIONS = {
 }
 UNDERFLOOR_OPTIONS = {
     vol.Required(CONF_ROOM_SILENT): _number(0, 48, 1, HOURS),
+    vol.Required(CONF_PULSE_INTERVAL): _number(30, 120, 5, MINUTES),
+    vol.Required(CONF_PULSE_FLUSH): _number(5, 30, 1, MINUTES),
+}
+# Underfloor zones choose their control method; the outdoor temperature is for the
+# tickle pulses. In the form they come right after the other entities.
+UNDERFLOOR_ENTITIES = {
+    vol.Optional(CONF_OUTSIDE_SENSOR): OUTSIDE_SENSOR,
+    vol.Required(CONF_STRATEGY): selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=STRATEGIES,
+            translation_key=CONF_STRATEGY,
+            mode=selector.SelectSelectorMode.LIST,
+        )
+    ),
 }
 
 
 def options_schema(system_type: str) -> vol.Schema:
     """Return the settings form for a zone of this system type."""
     if system_type == SYSTEM_UNDERFLOOR:
-        return vol.Schema({**OPTIONS, **UNDERFLOOR_OPTIONS})
+        return vol.Schema(
+            {
+                **ENTITIES_SCHEMA,
+                **UNDERFLOOR_ENTITIES,
+                **OPTIONS,
+                **UNDERFLOOR_OPTIONS,
+            }
+        )
     return vol.Schema(OPTIONS)
 
 
-def _validate(data: dict[str, Any], system_type: str) -> dict[str, str]:
+def _zones(
+    hass: HomeAssistant, exclude: ConfigEntry | None = None
+) -> list[dict[str, Any]]:
+    """Return the settings of the SmartHeat zones, but for the one excluded."""
+    return [
+        zone_config(entry)
+        for entry in hass.config_entries.async_entries(DOMAIN, include_ignore=False)
+        if entry is not exclude
+    ]
+
+
+def _validate(
+    data: dict[str, Any],
+    system_type: str,
+    other_zones: Iterable[dict[str, Any]] = (),
+) -> dict[str, str]:
+    """Return the errors in a zone's settings.
+
+    other_zones are the settings of the other SmartHeat zones.
+    """
     errors: dict[str, str] = {}
     if CONF_RETURN_SENSOR in data:
         if data[CONF_ROOM_SENSOR] == data[CONF_RETURN_SENSOR]:
@@ -132,6 +190,26 @@ def _validate(data: dict[str, Any], system_type: str) -> dict[str, str]:
         errors[CONF_RETURN_SENSOR] = "return_required"
     if CONF_MIN_TEMP in data and data[CONF_MIN_TEMP] >= data[CONF_MAX_TEMP]:
         errors[CONF_MAX_TEMP] = "min_above_max"
+    outside = data.get(CONF_OUTSIDE_SENSOR)
+    if outside and outside in (data[CONF_ROOM_SENSOR], data.get(CONF_RETURN_SENSOR)):
+        errors[CONF_OUTSIDE_SENSOR] = "outside_same_sensor"
+    if (
+        CONF_PULSE_FLUSH in data
+        and data[CONF_PULSE_FLUSH] > data[CONF_PULSE_INTERVAL] - FLUSH_GAP
+    ):
+        errors[CONF_PULSE_FLUSH] = "flush_too_long"
+    # A pulse ends at its own loop's return temperature, not at a mix of loops: a zone
+    # on tickle pulses can't share its return sensor with another zone, either way
+    if return_sensor := data.get(CONF_RETURN_SENSOR):
+        sharing = [
+            zone_strategy(zone)
+            for zone in other_zones
+            if zone.get(CONF_RETURN_SENSOR) == return_sensor
+        ]
+        if sharing and data.get(CONF_STRATEGY) == STRATEGY_TICKLE:
+            errors[CONF_STRATEGY] = "return_shared"
+        elif STRATEGY_TICKLE in sharing:
+            errors.setdefault(CONF_RETURN_SENSOR, "return_shared")
     return errors
 
 
@@ -147,7 +225,8 @@ class SmartHeatConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             self._async_abort_entries_match({CONF_VALVE: user_input[CONF_VALVE]})
-            if not (errors := _validate(user_input, user_input[CONF_SYSTEM_TYPE])):
+            system_type = user_input[CONF_SYSTEM_TYPE]
+            if not (errors := _validate(user_input, system_type, _zones(self.hass))):
                 settings = dict(user_input)
                 name = settings.pop(CONF_NAME)
                 system_type = settings.pop(CONF_SYSTEM_TYPE)
@@ -182,7 +261,8 @@ class SmartHeatOptionsFlow(OptionsFlow):
         system_type = self.config_entry.data[CONF_SYSTEM_TYPE]
         if user_input is not None:
             self._async_abort_entries_match({CONF_VALVE: user_input[CONF_VALVE]})
-            if not (errors := _validate(user_input, system_type)):
+            others = _zones(self.hass, self.config_entry)
+            if not (errors := _validate(user_input, system_type, others)):
                 return self.async_create_entry(data=user_input)
         return self.async_show_form(
             step_id="init",

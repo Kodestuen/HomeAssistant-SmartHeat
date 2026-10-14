@@ -1,6 +1,7 @@
 """Tests for the SmartHeat climate entity, with a fake valve and fake sensors."""
 
 from datetime import timedelta
+import math
 from typing import Any
 
 from freezegun.api import FrozenDateTimeFactory
@@ -16,6 +17,7 @@ from homeassistant.components.climate import (
     ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
     DOMAIN as CLIMATE_DOMAIN,
+    PRESET_AWAY,
     PRESET_ECO,
     PRESET_NONE,
     SERVICE_SET_HVAC_MODE,
@@ -27,6 +29,7 @@ from homeassistant.components.climate import (
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
+    EVENT_HOMEASSISTANT_FINAL_WRITE,
     STATE_OFF,
     STATE_ON,
     STATE_UNAVAILABLE,
@@ -46,26 +49,48 @@ from custom_components.smartheat.const import (
     CONF_HYSTERESIS,
     CONF_MIN_CLOSED,
     CONF_MIN_OPEN,
+    CONF_OUTSIDE_SENSOR,
     CONF_RETURN_SENSOR,
     CONF_ROOM_SENSOR,
     CONF_ROOM_SILENT,
+    CONF_STRATEGY,
     CONF_SUPPLY_SENSOR,
     CONF_SYSTEM_TYPE,
     CONF_VALVE,
     CONF_WINDOW_SENSOR,
     DOMAIN,
+    PRESET_FROST,
+    STRATEGY_THERMOSTAT,
+    STRATEGY_TICKLE,
     SYSTEM_RADIATOR,
     SYSTEM_UNDERFLOOR,
     default_options,
 )
 from custom_components.smartheat.controller import HOLD_INTERVAL_S, Grid, zone_phase
+from custom_components.smartheat.tickle import TickleController
 
 VALVE = "input_boolean.test_valve"
 ROOM = "sensor.test_room"
 RETURN = "sensor.test_return"
 SUPPLY = "sensor.test_supply"
 WINDOW = "binary_sensor.test_window"
+OUTSIDE = "sensor.test_outside"
+WEATHER = "weather.test_home"
 CLIMATE = "climate.test_zone"
+RETURN_OFFSET = "sensor.test_zone_return_offset"
+RETURN_TARGET = "sensor.test_zone_return_target"
+PULSE_INTERVAL_S = 2700  # a pulse may start every 45 minutes by default
+# Learned by the thermostat, as saved by SmartHeat 0.3.0: h is 8 °C
+SAVED_BY_0_3_0 = {
+    "flat_overshoot": 0.3,
+    "beta": 1.8,
+    "beta_samples": 4,
+    "holding_delta": 8.0,
+    "cycles": 6,
+    "heat_up_rate": 0.5,
+    "last_overshoot": 0.25,
+    "last_peak_error": 0.05,
+}
 
 
 def set_temperature(hass: HomeAssistant, entity_id: str, value: float) -> None:
@@ -567,7 +592,8 @@ async def test_saved_learning_has_the_open_share_of_underfloor_zones(
     expected = controller.model.to_dict()
     if system_type == SYSTEM_UNDERFLOOR:
         # Next to the model's values, so older versions still read them
-        expected["calibration"] = {"duty": controller.calibration.duty}
+        expected["calibration"] = controller.calibration.to_dict()
+        assert expected["calibration"]["duty"] == controller.calibration.duty
     else:
         assert controller.calibration is None
     assert hass_storage[f"{DOMAIN}.{entry.entry_id}"]["data"] == expected
@@ -640,6 +666,7 @@ async def test_exposes_zone_configuration(
     state = hass.states.get(CLIMATE)
     configuration = {
         "system_type": SYSTEM_RADIATOR,
+        "strategy": STRATEGY_THERMOSTAT,
         "valve_entity_id": VALVE,
         "room_sensor_entity_id": ROOM,
         "return_sensor_entity_id": RETURN,
@@ -757,3 +784,551 @@ async def test_device_takes_area_of_room_sensor_or_its_device(
 
     [device] = dr.async_entries_for_config_entry(device_registry, entry.entry_id)
     assert device.area_id == (area_ids[zone_area] if zone_area else None)
+
+
+# Tickle pulses (SmartHeat 0.4.0)
+
+
+async def setup_tickle_zone(
+    hass: HomeAssistant,
+    *,
+    outside: float = 0.0,
+    entry_id: str | None = None,
+    **options: Any,
+) -> MockConfigEntry:
+    """Set up an underfloor zone on tickle pulses, with an outdoor sensor.
+
+    The room is at the 21 °C target and the return water at 25 °C. With the return
+    offset at its start of 4.35 °C and 0 °C outdoors, the return target is
+    21 + 4.35 + 0.15 * 21 = 28.5 °C.
+    """
+    set_temperature(hass, OUTSIDE, outside)
+    entry = await setup_zone(
+        hass,
+        system_type=SYSTEM_UNDERFLOOR,
+        entry_id=entry_id,
+        **{CONF_STRATEGY: STRATEGY_TICKLE, CONF_OUTSIDE_SENSOR: OUTSIDE, **options},
+    )
+    set_temperature(hass, RETURN, 25.0)
+    await hass.async_block_till_done()
+    return entry
+
+
+def pulse_times(entry: MockConfigEntry) -> Grid:
+    """Return the times at which the zone may start a pulse."""
+    return Grid(PULSE_INTERVAL_S, zone_phase(entry.entry_id, PULSE_INTERVAL_S))
+
+
+def climate_attributes(hass: HomeAssistant) -> dict[str, Any]:
+    return dict(hass.states.get(CLIMATE).attributes)
+
+
+def valve_is_open(hass: HomeAssistant) -> bool:
+    return hass.states.get(VALVE).state == STATE_ON
+
+
+def iso(timestamp: float) -> str:
+    return dt_util.utc_from_timestamp(timestamp).isoformat()
+
+
+@pytest.mark.parametrize(
+    ("system_type", "options", "strategy"),
+    [
+        (SYSTEM_UNDERFLOOR, {}, STRATEGY_THERMOSTAT),
+        (SYSTEM_UNDERFLOOR, {CONF_STRATEGY: STRATEGY_TICKLE}, STRATEGY_TICKLE),
+        (SYSTEM_RADIATOR, {}, STRATEGY_THERMOSTAT),
+        # Only underfloor zones run tickle pulses, whatever the options say
+        (SYSTEM_RADIATOR, {CONF_STRATEGY: STRATEGY_TICKLE}, STRATEGY_THERMOSTAT),
+    ],
+)
+async def test_control_method_attributes(
+    hass: HomeAssistant, system_type: str, options: dict[str, Any], strategy: str
+) -> None:
+    entry = await setup_zone(hass, system_type=system_type, **options)
+    tickle = strategy == STRATEGY_TICKLE
+    assert isinstance(entry.runtime_data.controller, TickleController) is tickle
+    state = hass.states.get(CLIMATE)
+    attributes = state.attributes
+    assert attributes["strategy"] == strategy
+    pulses = {"return_threshold", "next_pulse", "outside_temperature", "calibrating"}
+    if tickle:
+        assert pulses <= attributes.keys()
+        # Without an outdoor sensor: 21 + 7.5 - 4 * (room - target)
+        assert attributes["return_threshold"] == 28.5
+        assert attributes["outside_temperature"] is None
+    else:
+        assert pulses.isdisjoint(attributes)
+    underfloor = {
+        "outside_sensor_entity_id": None,
+        "pulse_interval_minutes": 45,
+        "pulse_flush_minutes": 12,
+    }
+    if system_type == SYSTEM_UNDERFLOOR:
+        assert {key: attributes[key] for key in underfloor} == underfloor
+    else:
+        assert underfloor.keys().isdisjoint(attributes)
+    # The configuration and the values with their own entity or a fixed grid are
+    # left out of the history
+    unrecorded = state.state_info["unrecorded_attributes"]
+    assert unrecorded.issuperset(
+        {"strategy", *underfloor, "return_threshold", "next_pulse"}
+    )
+    assert "outside_temperature" in unrecorded
+    assert "calibrating" not in unrecorded
+
+
+async def test_tickle_pulse_runs_until_the_return_reaches_its_target(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    now = dt_util.utcnow().timestamp()
+    attributes = climate_attributes(hass)
+    # After a start the valve waits for the zone's next pulse time
+    assert not valve_is_open(hass)
+    assert attributes["strategy"] == STRATEGY_TICKLE
+    assert attributes["reason"] == "waiting"
+    assert attributes["next_pulse"] == iso(pulse_times(entry).next(now))
+    assert attributes["return_threshold"] == 28.5
+    assert attributes["outside_temperature"] == 0.0
+    assert attributes["calibrating"] is True
+    # The thermostat's prediction isn't used
+    assert attributes["predicted_overshoot"] is None
+    assert attributes["close_threshold"] is None
+    assert attributes["coasting"] is False
+    assert hass.states.get(RETURN_OFFSET).state == "4.35"
+    assert hass.states.get(RETURN_TARGET).state == "28.5"
+
+    # A pulse starts at the pulse time and lasts at least the 12 minute flush, even
+    # if the return is warm enough sooner. (A pulse time a minute or more away, so
+    # that the zone's once-a-minute step comes after it.)
+    point = pulse_times(entry).next(now + 60)
+    await move_to(hass, freezer, point + 30)
+    assert valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "pulse_flush"
+    set_temperature(hass, RETURN, 29.0)
+    await hass.async_block_till_done()
+    await wait(hass, freezer, timedelta(minutes=11))
+    assert valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "pulse_flush"
+
+    # After the flush it runs until the return water reaches the return target
+    set_temperature(hass, RETURN, 26.0)
+    await hass.async_block_till_done()
+    await wait(hass, freezer, timedelta(minutes=1))
+    assert valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "pulse"
+    set_temperature(hass, RETURN, 28.5)
+    await hass.async_block_till_done()
+    assert not valve_is_open(hass)
+    attributes = climate_attributes(hass)
+    assert attributes["reason"] == "return_reached"
+    assert attributes["next_pulse"] == iso(point + PULSE_INTERVAL_S)
+
+    # The valve stays closed until the next pulse time
+    await move_to(hass, freezer, point + PULSE_INTERVAL_S - 30)
+    assert not valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "return_reached"
+    await move_to(hass, freezer, point + PULSE_INTERVAL_S + 30)
+    assert valve_is_open(hass)
+
+
+@pytest.mark.parametrize(
+    ("room", "duty", "opens"),
+    [
+        (21.3, 0.4, False),  # warm: 0.3 °C above the target
+        (21.0, 0.4, True),
+        # Mild weather: 20 % of 45 minutes is shorter than a pulse, so a room at the
+        # target skips it; a room below the target still gets one
+        (21.0, 0.2, False),
+        (20.9, 0.2, True),
+    ],
+)
+async def test_tickle_pulse_is_skipped_in_a_warm_room(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    room: float,
+    duty: float,
+    opens: bool,
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    entry.runtime_data.controller.calibration.duty = duty  # the last day's share
+    set_temperature(hass, ROOM, room)
+    await hass.async_block_till_done()
+    point = pulse_times(entry).next(dt_util.utcnow().timestamp() + 60)
+    await move_to(hass, freezer, point + 30)
+    assert valve_is_open(hass) is opens
+    reason = climate_attributes(hass)["reason"]
+    assert reason == ("pulse_flush" if opens else "pulse_skipped")
+
+
+async def test_tickle_target_rise_starts_a_pulse_after_the_zones_delay(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    set_temperature(hass, ROOM, 21.4)  # warm for 21 °C
+    await hass.async_block_till_done()
+    # A pulse time at least 10 minutes after the start, so the valve has been closed
+    # that long; it skips the pulse
+    point = pulse_times(entry).next(dt_util.utcnow().timestamp() + 600)
+    await move_to(hass, freezer, point)
+    assert climate_attributes(hass)["reason"] == "pulse_skipped"
+
+    # The morning target: a pulse starts after the zone's own few minutes, so that
+    # zones on one schedule don't all open at once
+    await hass.services.async_call(
+        CLIMATE_DOMAIN,
+        SERVICE_SET_TEMPERATURE,
+        {ATTR_ENTITY_ID: CLIMATE, ATTR_TEMPERATURE: 22.0},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    delay = zone_phase(entry.entry_id, PULSE_INTERVAL_S) % 600
+    for _ in range(math.ceil(delay / 60)):  # one control step a minute
+        assert not valve_is_open(hass)
+        await wait(hass, freezer, timedelta(minutes=1))
+    assert valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "pulse_flush"
+    assert dt_util.utcnow().timestamp() < point + PULSE_INTERVAL_S
+
+
+@pytest.mark.parametrize(
+    ("lost", "waiting", "fallback", "opening", "fallback_duty"),
+    [
+        # Timed pulses by the room
+        ([RETURN], "return_sensor_unavailable", "return_sensor", "timed_pulse", 40),
+        # Pulses to the return target, at most for the last day's share
+        ([ROOM], "room_sensor_unavailable", "room_sensor", "pulse_flush", 40),
+        # Timed pulses by the last day's share
+        ([ROOM, RETURN], "room_sensor_unavailable", "sensors", "timed_pulse", 40),
+    ],
+)
+async def test_tickle_keeps_pulsing_without_a_sensor(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    lost: list[str],
+    waiting: str,
+    fallback: str,
+    opening: str,
+    fallback_duty: int | None,
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    # Aired at the first pulse time, which passes without a pulse
+    hass.states.async_set(WINDOW, STATE_ON)
+    await hass.async_block_till_done()
+    point = pulse_times(entry).next(dt_util.utcnow().timestamp())
+    await move_to(hass, freezer, point + 60)
+    assert climate_attributes(hass)["reason"] == "window_open"
+    hass.states.async_set(WINDOW, STATE_OFF)
+    await hass.async_block_till_done()
+    assert climate_attributes(hass)["reason"] == "waiting"
+
+    # The sensors go 5 minutes before the next pulse time
+    point += PULSE_INTERVAL_S
+    await move_to(hass, freezer, point - 300)
+    for entity_id in lost:
+        hass.states.async_set(entity_id, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    attributes = climate_attributes(hass)
+    assert attributes["reason"] == waiting
+    assert attributes["fallback"] is None
+
+    # Missing for 2 minutes: the fallback starts, but opens only at a pulse time
+    await wait(hass, freezer, timedelta(minutes=1))
+    assert climate_attributes(hass)["reason"] == waiting
+    await wait(hass, freezer, timedelta(minutes=1))
+    attributes = climate_attributes(hass)
+    assert not valve_is_open(hass)
+    assert attributes["reason"] == "waiting"
+    assert attributes["fallback"] == fallback
+    assert attributes["fallback_duty"] == fallback_duty
+    # Only the room fallback ends its pulses at a return target, one without the room
+    threshold = 28.5 if fallback == "room_sensor" else None
+    assert attributes["return_threshold"] == threshold
+
+    # It opens at the pulse time for 40 % of the 45 minutes: 18 minutes
+    await move_to(hass, freezer, point + 30)
+    assert valve_is_open(hass)
+    attributes = climate_attributes(hass)
+    assert attributes["reason"] == opening
+    assert attributes["fallback"] == fallback
+    await wait(hass, freezer, timedelta(minutes=17))
+    assert valve_is_open(hass)
+    await wait(hass, freezer, timedelta(minutes=1))
+    assert not valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "waiting"
+
+
+async def test_tickle_pulse_carries_on_after_a_reload(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    point = pulse_times(entry).next(dt_util.utcnow().timestamp() + 60)
+    await move_to(hass, freezer, point + 30)
+    await wait(hass, freezer, timedelta(minutes=13))  # past the flush
+    assert climate_attributes(hass)["reason"] == "pulse"
+    entry.runtime_data.controller.calibration.adjust_offset(0.5)  # learned: 4.85
+
+    # The zone is reloaded mid-pulse: it saves and reads back what it learned. The
+    # valve stayed open, and its last change shows that the flush is over.
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.controller.return_offset == pytest.approx(4.85)
+    assert valve_is_open(hass)
+    attributes = climate_attributes(hass)
+    assert attributes["reason"] == "pulse"
+    assert attributes["return_threshold"] == 29.0  # 21 + 4.85 + 0.15 * 21
+    set_temperature(hass, RETURN, 29.0)
+    await hass.async_block_till_done()
+    assert not valve_is_open(hass)
+    assert climate_attributes(hass)["reason"] == "return_reached"
+
+
+@pytest.mark.parametrize(
+    "calibration",
+    [None, {"duty": 0.55}],  # as saved by SmartHeat 0.3.0 and 0.3.1
+    ids=["0.3.0", "0.3.1"],
+)
+async def test_tickle_zone_starts_from_what_the_thermostat_learned(
+    hass: HomeAssistant,
+    hass_storage: dict[str, Any],
+    calibration: dict[str, Any] | None,
+) -> None:
+    entry_id = "01K7SMARTHEAT040ZONE000001"
+    key = f"{DOMAIN}.{entry_id}"
+    saved = dict(SAVED_BY_0_3_0)
+    if calibration is not None:
+        saved["calibration"] = calibration
+    hass_storage[key] = {"version": 1, "minor_version": 1, "key": key, "data": saved}
+    entry = await setup_tickle_zone(hass, entry_id=entry_id)
+
+    # The return offset starts from the thermostat's h: at 21 °C between the target
+    # and outdoors, the return target is the target + h
+    controller = entry.runtime_data.controller
+    assert controller.return_offset == pytest.approx(8.0 - 0.15 * 21)
+    assert climate_attributes(hass)["return_threshold"] == 29.0
+    assert controller.model.to_dict() == SAVED_BY_0_3_0
+    assert controller.calibration.duty == pytest.approx(
+        0.4 if calibration is None else 0.55, abs=0.001
+    )
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    data = hass_storage[key]["data"]
+    # The model as it was, so older versions read it, and the calibration next to it
+    assert {name: data[name] for name in SAVED_BY_0_3_0} == SAVED_BY_0_3_0
+    assert data["calibration"] == controller.calibration.to_dict()
+    assert data["calibration"]["return_offset"] == pytest.approx(4.85)
+    assert data["calibration"]["offset_slope"] == 0.15
+    assert data["calibration"]["last_outside"] == 0.0
+
+
+async def test_switching_the_control_method_keeps_the_zones_entities(
+    hass: HomeAssistant, entity_registry: er.EntityRegistry
+) -> None:
+    entry = await setup_zone(hass, system_type=SYSTEM_UNDERFLOOR)
+    thermostat_sensors = zone_sensors(entity_registry, entry)
+    assert {"return_offset", "return_target"}.isdisjoint(thermostat_sensors)
+
+    await save_options(hass, entry, {**entry.options, CONF_STRATEGY: STRATEGY_TICKLE})
+    assert isinstance(entry.runtime_data.controller, TickleController)
+    assert hass.states.get(CLIMATE).attributes["strategy"] == STRATEGY_TICKLE
+    sensors = zone_sensors(entity_registry, entry)
+    # The tickle adds its two sensors; the thermostat's stay
+    assert sensors == {
+        **thermostat_sensors,
+        "return_offset": RETURN_OFFSET,
+        "return_target": RETURN_TARGET,
+    }
+    assert hass.states.get(RETURN_OFFSET).state == "7.5"  # no outdoor sensor
+    assert hass.states.get(RETURN_TARGET).state == "28.5"
+
+    # Back to the thermostat: the tickle's sensors go, not left as unavailable
+    await save_options(
+        hass, entry, {**entry.options, CONF_STRATEGY: STRATEGY_THERMOSTAT}
+    )
+    assert not isinstance(entry.runtime_data.controller, TickleController)
+    assert hass.states.get(CLIMATE).attributes["strategy"] == STRATEGY_THERMOSTAT
+    assert zone_sensors(entity_registry, entry) == thermostat_sensors
+    assert hass.states.get(RETURN_OFFSET) is None
+    assert hass.states.get(RETURN_TARGET) is None
+
+    # ... and come back under the same entity IDs, so their history continues
+    await save_options(hass, entry, {**entry.options, CONF_STRATEGY: STRATEGY_TICKLE})
+    assert zone_sensors(entity_registry, entry) == sensors
+    assert hass.states.get(RETURN_OFFSET).state == "7.5"
+    assert (
+        entity_registry.async_get_entity_id(
+            CLIMATE_DOMAIN, DOMAIN, f"{entry.entry_id}_climate"
+        )
+        == CLIMATE
+    )
+
+
+async def test_weather_entity_gives_the_outdoor_temperature(
+    hass: HomeAssistant,
+) -> None:
+    # In the unit the weather entity shows
+    hass.states.async_set(
+        WEATHER, "cloudy", {"temperature": 32.0, "temperature_unit": "°F"}
+    )
+    await setup_tickle_zone(hass, **{CONF_OUTSIDE_SENSOR: WEATHER})
+    attributes = climate_attributes(hass)
+    assert attributes["outside_sensor_entity_id"] == WEATHER
+    assert attributes["outside_temperature"] == 0.0
+    assert attributes["return_threshold"] == 28.5
+
+    # A new forecast is taken in at once: 21 + 4.35 + 0.15 * (21 + 5)
+    hass.states.async_set(
+        WEATHER, "rainy", {"temperature": 23.0, "temperature_unit": "°F"}
+    )
+    await hass.async_block_till_done()
+    attributes = climate_attributes(hass)
+    assert attributes["outside_temperature"] == -5.0
+    assert attributes["return_threshold"] == 29.25
+
+    # Without a reading the last one is used, for up to 48 hours
+    hass.states.async_set(WEATHER, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    attributes = climate_attributes(hass)
+    assert attributes["outside_temperature"] == -5.0
+    assert attributes["return_threshold"] == 29.25
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "state", "state_attributes"),
+    [
+        (OUTSIDE, "23.0", {"unit_of_measurement": "°F"}),
+        (OUTSIDE, "268.15", {"unit_of_measurement": "K"}),
+        # A weather entity that doesn't know the weather may still know the temperature
+        (WEATHER, "unknown", {"temperature": -5.0, "temperature_unit": "°C"}),
+    ],
+)
+async def test_outdoor_temperature_in_other_units_and_states(
+    hass: HomeAssistant,
+    entity_id: str,
+    state: str,
+    state_attributes: dict[str, Any],
+) -> None:
+    await setup_tickle_zone(hass, **{CONF_OUTSIDE_SENSOR: entity_id})
+    hass.states.async_set(entity_id, state, state_attributes)
+    await hass.async_block_till_done()
+    attributes = climate_attributes(hass)
+    assert attributes["outside_temperature"] == -5.0
+    assert attributes["return_threshold"] == 29.25  # 21 + 4.35 + 0.15 * (21 + 5)
+
+
+@pytest.mark.parametrize(
+    ("preset", "calibrating"),
+    [
+        (PRESET_NONE, True),
+        (PRESET_ECO, True),
+        # Targets a room isn't held at for long: their error says little about c
+        (PRESET_AWAY, False),
+        (PRESET_FROST, False),
+    ],
+)
+async def test_tickle_calibrates_in_comfort_and_eco_only(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, preset: str, calibrating: bool
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    await hass.services.async_call(
+        CLIMATE_DOMAIN,
+        SERVICE_SET_PRESET_MODE,
+        {ATTR_ENTITY_ID: CLIMATE, ATTR_PRESET_MODE: preset},
+        blocking=True,
+    )
+    # Within 1 °C of the preset's target, where c is calibrated
+    set_temperature(hass, ROOM, climate_attributes(hass)[ATTR_TEMPERATURE] + 0.5)
+    await hass.async_block_till_done()
+    controller = entry.runtime_data.controller
+    offset = controller.return_offset
+    await wait(hass, freezer, timedelta(minutes=1))
+    assert climate_attributes(hass)["calibrating"] is calibrating
+    assert (controller.return_offset < offset) is calibrating  # 0.5 °C warm: down
+
+
+async def test_reset_learning_on_tickle_pulses_restarts_the_return_offset(
+    hass: HomeAssistant, hass_storage: dict[str, Any], freezer: FrozenDateTimeFactory
+) -> None:
+    entry_id = "01K7SMARTHEAT040ZONE000002"
+    key = f"{DOMAIN}.{entry_id}"
+    calibration = {"duty": 0.33, "return_offset": 6.0, "offset_slope": 0.15}
+    saved = {**SAVED_BY_0_3_0, "calibration": calibration}
+    hass_storage[key] = {"version": 1, "minor_version": 1, "key": key, "data": saved}
+    entry = await setup_tickle_zone(hass, outside=-4.0, entry_id=entry_id)
+    controller = entry.runtime_data.controller
+    assert controller.return_offset == 6.0
+    assert climate_attributes(hass)["return_threshold"] == 30.75  # 21 + 6 + 0.15 * 25
+
+    await hass.services.async_call(
+        DOMAIN, "reset_learning", {ATTR_ENTITY_ID: CLIMATE}, blocking=True
+    )
+    await hass.async_block_till_done()
+    # The offset starts again from the thermostat's h, which stays, as does the share
+    # of the time the valve was open
+    assert controller.return_offset == pytest.approx(8.0 - 0.15 * 25)
+    assert climate_attributes(hass)["return_threshold"] == 29.0  # the target + h
+    assert controller.model.to_dict() == SAVED_BY_0_3_0
+    assert hass.states.get("sensor.test_zone_learning_cycles").state == "6"
+    assert controller.calibration.duty == pytest.approx(0.33, abs=0.001)
+    # Saved soon, though a change to the offset alone usually waits
+    await wait(hass, freezer, timedelta(seconds=11))
+    stored = hass_storage[key]["data"]["calibration"]
+    assert stored["return_offset"] == pytest.approx(4.25)
+
+
+async def test_reset_learning_on_the_thermostat_keeps_the_open_share(
+    hass: HomeAssistant, hass_storage: dict[str, Any], freezer: FrozenDateTimeFactory
+) -> None:
+    entry_id = "01K7SMARTHEAT040ZONE000003"
+    key = f"{DOMAIN}.{entry_id}"
+    saved = {**SAVED_BY_0_3_0, "calibration": {"duty": 0.55}}
+    hass_storage[key] = {"version": 1, "minor_version": 1, "key": key, "data": saved}
+    entry = await setup_zone(hass, system_type=SYSTEM_UNDERFLOOR, entry_id=entry_id)
+    controller = entry.runtime_data.controller
+    assert controller.model.trained
+
+    await hass.services.async_call(
+        DOMAIN, "reset_learning", {ATTR_ENTITY_ID: CLIMATE}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert not controller.model.trained
+    assert controller.model.cycles == 0
+    assert controller.calibration.duty == pytest.approx(0.55, abs=0.001)
+    await wait(hass, freezer, timedelta(seconds=11))
+    data = hass_storage[key]["data"]
+    assert (data["cycles"], data["holding_delta"]) == (0, None)
+    assert data["calibration"]["duty"] == pytest.approx(0.55, abs=0.001)
+
+
+async def test_return_offset_alone_is_saved_at_most_every_half_hour(
+    hass: HomeAssistant, hass_storage: dict[str, Any], freezer: FrozenDateTimeFactory
+) -> None:
+    entry = await setup_tickle_zone(hass)
+    key = f"{DOMAIN}.{entry.entry_id}"
+    calibration = entry.runtime_data.controller.calibration
+
+    def saved_offset() -> float | None:
+        stored = hass_storage.pop(key, None)
+        return stored and stored["data"]["calibration"]["return_offset"]
+
+    # The offset's start is saved at once
+    await wait(hass, freezer, timedelta(seconds=11))
+    assert saved_offset() == pytest.approx(4.35)
+
+    # A later change waits for the end of the half hour since that save
+    calibration.adjust_offset(0.1)
+    await wait(hass, freezer, timedelta(minutes=1))
+    await wait(hass, freezer, timedelta(seconds=11))
+    assert saved_offset() is None
+    await wait(hass, freezer, timedelta(minutes=29))
+    assert saved_offset() == pytest.approx(4.45)
+
+    # When Home Assistant stops before then, the store writes it on the way out
+    calibration.adjust_offset(0.1)
+    await wait(hass, freezer, timedelta(minutes=1))
+    await wait(hass, freezer, timedelta(seconds=11))
+    assert saved_offset() is None
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+    await hass.async_block_till_done()
+    assert saved_offset() == pytest.approx(4.55)

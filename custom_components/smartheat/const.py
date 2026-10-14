@@ -14,8 +14,10 @@ CONF_ROOM_SENSOR = "room_sensor"
 CONF_RETURN_SENSOR = "return_sensor"
 CONF_SUPPLY_SENSOR = "supply_sensor"
 CONF_WINDOW_SENSOR = "window_sensor"
+CONF_OUTSIDE_SENSOR = "outside_sensor"  # a temperature sensor or a weather entity
 
 # Tuning (options flow)
+CONF_STRATEGY = "strategy"
 CONF_INVERT_VALVE = "invert_valve"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
@@ -27,6 +29,8 @@ CONF_COAST_WINDOW = "coast_window_minutes"
 CONF_MAX_RETURN = "max_return_temp"
 CONF_SENSOR_TIMEOUT = "sensor_timeout_minutes"
 CONF_ROOM_SILENT = "room_sensor_silent_hours"
+CONF_PULSE_INTERVAL = "pulse_interval_minutes"
+CONF_PULSE_FLUSH = "pulse_flush_minutes"
 CONF_FROST_TEMP = "frost_temp"
 CONF_ECO_TEMP = "eco_temp"
 CONF_AWAY_TEMP = "away_temp"
@@ -38,10 +42,17 @@ ATTR_ROOM_SENSOR_ENTITY_ID = "room_sensor_entity_id"
 ATTR_RETURN_SENSOR_ENTITY_ID = "return_sensor_entity_id"
 ATTR_SUPPLY_SENSOR_ENTITY_ID = "supply_sensor_entity_id"
 ATTR_WINDOW_SENSOR_ENTITY_ID = "window_sensor_entity_id"
+ATTR_OUTSIDE_SENSOR_ENTITY_ID = "outside_sensor_entity_id"
 
 SYSTEM_UNDERFLOOR = "underfloor"
 SYSTEM_RADIATOR = "radiator"
 SYSTEM_TYPES = [SYSTEM_UNDERFLOOR, SYSTEM_RADIATOR]
+
+# Control methods. Every zone starts on the thermostat; only underfloor zones can
+# switch to the experimental tickle pulses.
+STRATEGY_THERMOSTAT = "thermostat"
+STRATEGY_TICKLE = "tickle"
+STRATEGIES = [STRATEGY_THERMOSTAT, STRATEGY_TICKLE]
 
 PRESET_FROST = "frost"
 DEFAULT_TARGET = 21.0
@@ -65,6 +76,9 @@ SYSTEM_DEFAULTS = {
         CONF_COAST_WINDOW: 240,
         CONF_MAX_RETURN: 45.0,
         CONF_ROOM_SILENT: 6,  # hours, 0 = off
+        CONF_STRATEGY: STRATEGY_THERMOSTAT,
+        CONF_PULSE_INTERVAL: 45,
+        CONF_PULSE_FLUSH: 12,
     },
     SYSTEM_RADIATOR: {
         CONF_MIN_OPEN: 5,

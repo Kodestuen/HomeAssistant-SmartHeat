@@ -12,10 +12,15 @@ This plant is closer to a real floor:
 - a room sensor that lags 10 min; both report in 0.1 °C steps;
 - a constant 35 °C supply, and the weather and night setback of test_simulation.py.
 
-The zone runs SmartHeat's real controller with the installed underfloor defaults. The
+The zone runs SmartHeat's real controllers with the installed underfloor defaults. The
 tests take the room sensor away for 24 h: SmartHeat 0.3.0 closed the valve for good
 and the room cooled far below the target; the duty hold keeps it warm. They also aim
 the thermostat 0.15 °C above the target, which brings the room's average closer to it.
+
+The tickle pulses run on the same floor, with the outdoor temperature from the weather
+or without it, also in mild weather (a +10 °C mean), through a day without the room or
+the return sensor, and through 11 restarts of Home Assistant. The days without a sensor
+and the runs without an outdoor temperature are checked at several pulse times.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from test_simulation import TARGET, target_at, weather
 
 from smartheat_core.controller import Controller, ControllerConfig, Inputs
 from smartheat_core.learning import OvershootModel, ZoneCalibration
+from smartheat_core.tickle import TickleConfig, TickleController
 
 DAY = 86400
 CONTROL_STEP_S = 60
@@ -41,9 +47,17 @@ SUPPLY = 35.0
 WATER_HEAT = 4186.0  # J/K per litre
 DAYS = 12
 MEASURE_FROM_DAY = 4
-OUTAGE = (6 * DAY, 7 * DAY)  # the room sensor is unavailable from day 6, 00:00
+OUTAGE = (6 * DAY, 7 * DAY)  # a sensor is unavailable from day 6, 00:00
 PHASES = (0.0, 1.3, 2.6)  # where in its 5-day cycle the weather starts
 AIM = 0.15  # the aim offset the README suggests for underfloor zones
+MILD = 10.0  # °C added to the weather in mild runs: a +10 °C mean instead of 0 °C
+GRID_PHASE_S = 779.0  # the tickle zone's grid; its points don't fall on 06:00
+# Each zone pulses at minutes of its own. The outage and no-outdoor results vary with
+# them, so they are checked on several grids: spread over the interval, with points
+# on a control step and between two.
+GRID_PHASES = (0.0, 300.0, GRID_PHASE_S, 1350.0, 1950.0, 2400.0)
+# Home Assistant restarts a little over a day apart, each at another time of day
+RESTARTS = tuple(int((k + 0.5) * DAYS * DAY / 11) // 60 * 60 for k in range(11))
 
 
 class FloorPlant:
@@ -132,8 +146,9 @@ class Sensor:
 @dataclass
 class Result:
     comfort_errors: list[float] = field(default_factory=list)  # room - target, daytime
+    outage_errors: list[float] = field(default_factory=list)  # ... while it is lost
     valve_changes: list[float] = field(default_factory=list)
-    outage_min: float = math.inf  # the true room while the sensor is lost
+    outage_min: float = math.inf  # the true room while a sensor is lost
     outage_max: float = -math.inf
 
     @property
@@ -144,6 +159,11 @@ class Result:
     def mean_error(self) -> float:
         """How far the room sits above the target on average; below if negative."""
         return sum(self.comfort_errors) / len(self.comfort_errors)
+
+    @property
+    def outage_mean_error(self) -> float:
+        """The same for the day without a sensor."""
+        return sum(self.outage_errors) / len(self.outage_errors)
 
     @property
     def openings_per_day(self) -> float:
@@ -167,39 +187,110 @@ def zone_config(hold: bool, aim: float = 0.0) -> ControllerConfig:
     )
 
 
-@cache
+def tickle_config(outdoor: bool, grid: float = GRID_PHASE_S) -> TickleConfig:
+    """The tickle's defaults: a pulse may start every 45 min, and runs 12 min at least.
+
+    The settings the thermostat shares with it are the installed underfloor defaults.
+    """
+    return TickleConfig(
+        hysteresis=0.3,
+        min_open_s=900,
+        min_closed_s=900,
+        coast_window_s=4 * 3600,
+        max_return=45.0,
+        room_silent_s=6 * 3600,
+        hold_interval_s=2700,
+        grid_phase_s=grid,
+        flush_s=720,
+        has_outside_sensor=outdoor,
+    )
+
+
 def simulate(
-    phase: float, hold: bool, outage: bool = False, aim: float = 0.0
+    phase: float,
+    hold: bool = True,
+    outage: bool = False,
+    aim: float = 0.0,
+    tickle: bool = False,
+    outdoor: bool = True,
+    mean: float = 0.0,
+    return_outage: bool = False,
+    restarts: bool = False,
+    grid: float = GRID_PHASE_S,
 ) -> Result:
-    """Run the zone for 12 days; measure the true room from day 4 on."""
-    plant = FloorPlant(weather(phase))
+    """Run the zone for 12 days; measure the true room from day 4 on.
+
+    - hold: the thermostat with what 0.3.1 adds; aim: its aim offset
+    - tickle: the tickle pulses instead, with an outdoor sensor if outdoor, on the
+      grid with this phase
+    - mean: °C added to the weather
+    - outage: no room sensor for a day; return_outage: no return sensor
+    - restarts: Home Assistant restarts 11 times
+    """
+    return _simulate(
+        phase, hold, outage, aim, tickle, outdoor, mean, return_outage, restarts, grid
+    )
+
+
+@cache
+def _simulate(
+    phase: float,
+    hold: bool,
+    outage: bool,
+    aim: float,
+    tickle: bool,
+    outdoor: bool,
+    mean: float,
+    return_outage: bool,
+    restarts: bool,
+    grid: float,
+) -> Result:
+    def outside(t: float) -> float:
+        return weather(t / DAY + phase) + mean
+
+    plant = FloorPlant(outside(0))
     room_sensor = Sensor(plant.room, lag_s=600)
     return_sensor = Sensor(plant.tail, lag_s=90)
-    controller = Controller(
-        zone_config(hold, aim),
-        OvershootModel(initial_overshoot=0.4),
-        ZoneCalibration() if hold else None,
-    )
+    model = OvershootModel(initial_overshoot=0.4)
+    calibration = ZoneCalibration() if hold or tickle else None
+
+    def start() -> Controller:
+        if tickle:
+            return TickleController(tickle_config(outdoor, grid), model, calibration)
+        return Controller(zone_config(hold, aim), model, calibration)
+
+    controller = start()
     result = Result()
     valve, changed_at = False, -1e9
+    restart_at = list(RESTARTS) if restarts else []
 
     for now in range(CONTROL_STEP_S, DAYS * DAY + 1, CONTROL_STEP_S):
         # The last minute, in physics steps
         for t in range(now - CONTROL_STEP_S + PHYSICS_STEP_S, now + 1, PHYSICS_STEP_S):
-            plant.step(valve, PHYSICS_STEP_S, weather(t / DAY + phase))
+            plant.step(valve, PHYSICS_STEP_S, outside(t))
             room_sensor.follow(plant.room, PHYSICS_STEP_S)
             return_sensor.follow(plant.tail, PHYSICS_STEP_S)
 
-        lost = outage and OUTAGE[0] <= now < OUTAGE[1]
+        if restart_at and now >= restart_at[0]:
+            # The zone starts again from what it saved; the valve keeps its state, but
+            # reports it afresh
+            del restart_at[0]
+            model = OvershootModel.from_dict(model.to_dict(), 0.4)
+            if calibration is not None:
+                calibration = ZoneCalibration.from_dict(calibration.to_dict())
+            controller = start()
+            changed_at = now
+        lost = OUTAGE[0] <= now < OUTAGE[1] and (outage or return_outage)
         target = target_at(now)
         decision = controller.update(
             Inputs(
-                room=None if lost else room_sensor.read(),
-                return_temp=return_sensor.read(),
+                room=None if lost and outage else room_sensor.read(),
+                return_temp=None if lost and return_outage else return_sensor.read(),
                 target=target,
                 valve_open=valve,
                 valve_changed_at=changed_at,
                 room_updated_at=now,  # reports every minute
+                outside=outside(now),
             ),
             now,
         )
@@ -213,6 +304,8 @@ def simulate(
         hour = (now % DAY) / 3600
         if now > MEASURE_FROM_DAY * DAY and target == TARGET and hour >= 8:
             result.comfort_errors.append(plant.room - TARGET)
+            if lost:
+                result.outage_errors.append(plant.room - TARGET)
     return result
 
 
@@ -247,30 +340,136 @@ def test_aim_offset_brings_the_room_closer_to_the_target(phase):
     assert abs(aimed.mean_error) < abs(plain.mean_error)
 
 
+@pytest.mark.parametrize("phase", PHASES)
+def test_tickle_holds_the_room_closer_to_the_target(phase):
+    """At a 0 °C mean the tickle's error is at least 40 % smaller."""
+    thermostat = simulate(phase)
+    tickle = simulate(phase, tickle=True)
+    assert tickle.mean_abs_error <= 0.6 * thermostat.mean_abs_error
+    assert abs(tickle.mean_error) <= 0.1  # centred on the target
+    assert 10 <= tickle.openings_per_day <= 30
+
+
+@pytest.mark.parametrize("grid", GRID_PHASES)
+def test_tickle_without_an_outdoor_temperature(grid):
+    """c follows the weather only slowly, so the error is larger than with the term.
+
+    Measured over the three weather runs together, as the study did: a single run
+    varies more with the zone's pulse times, from 0.54 to 0.77 of the thermostat's.
+    """
+    tickle = [simulate(p, tickle=True, outdoor=False, grid=grid) for p in PHASES]
+    error = sum(r.mean_abs_error for r in tickle)
+    assert error <= 0.75 * sum(simulate(p).mean_abs_error for p in PHASES)
+
+
+def test_tickle_gains_less_in_mild_weather():
+    """At a +10 °C mean the floor needs little heat: even a short pulse is a lot.
+
+    The study measured this over the three weather runs together.
+    """
+    thermostat = [simulate(p, mean=MILD) for p in PHASES]
+    tickle = [simulate(p, tickle=True, mean=MILD) for p in PHASES]
+    error = sum(r.mean_abs_error for r in tickle)
+    assert error <= 0.9 * sum(r.mean_abs_error for r in thermostat)
+    assert all(abs(r.mean_error) <= 0.1 for r in tickle)
+
+
+@pytest.mark.parametrize("grid", GRID_PHASES)
+@pytest.mark.parametrize("phase", PHASES)
+@pytest.mark.parametrize(("mean", "highest"), [(0.0, 23.0), (MILD, 25.0)])
+def test_tickle_keeps_the_room_warm_without_the_room_sensor(grid, phase, mean, highest):
+    """Without the room, a pulse lasts at most the last day's share of an interval.
+
+    In mild weather that share is shorter than the minimum pulse, so it alone sets
+    the openings, as in the duty hold. On a day that turns warm the room overheats a
+    little: to 24.2-24.7 °C over these grids, against 24.3-24.5 °C with the duty hold
+    and 25.6-25.7 °C without the cap. The highest rooms come on grids whose points
+    fall on a control step: there an opening that ends just after a step lasts until
+    the next one, a minute longer each time.
+    """
+    result = simulate(phase, outage=True, tickle=True, mean=mean, grid=grid)
+    assert result.outage_min >= 17.0
+    assert result.outage_max <= highest
+
+
+@pytest.mark.parametrize("grid", GRID_PHASES)
+@pytest.mark.parametrize("phase", PHASES)
+def test_tickle_keeps_the_room_warm_without_the_return_sensor(grid, phase):
+    result = simulate(phase, tickle=True, return_outage=True, grid=grid)
+    assert result.outage_min >= 17.0
+    assert result.outage_max <= 22.5
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_restarts_hardly_change_the_tickle(phase):
+    restarted = simulate(phase, tickle=True, restarts=True)
+    error = simulate(phase, tickle=True).mean_abs_error
+    assert abs(restarted.mean_abs_error - error) <= 0.03
+
+
 # python tests/unit/test_simulation_loop.py prints the README numbers
 if __name__ == "__main__":
     controllers = (
         ("thermostat", {}),
         (f"thermostat, aim offset {AIM:+.2f}", {"aim": AIM}),
+        ("tickle", {"tickle": True}),
+        ("tickle without outdoor temperature", {"tickle": True, "outdoor": False}),
     )
     rows = (
         ("occupied mean |room - target| (K)", lambda r: f"{r.mean_abs_error:12.2f}"),
         ("occupied mean room - target (K)", lambda r: f"{r.mean_error:+12.2f}"),
         ("valve openings a day", lambda r: f"{r.openings_per_day:12.1f}"),
     )
-    print(f"{'weather phase':36}" + "".join(f"{p:>12}" for p in PHASES))
-    for title, show in rows:
-        print(title)
-        for label, options in controllers:
-            runs = [simulate(p, hold=True, **options) for p in PHASES]
-            print(f"  {label:34}" + "".join(show(r) for r in runs))
-    print("24 h room sensor outage, room (C):")
-    for label, hold in (
-        ("  valve closes (0.3.0)", False),
-        ("  duty hold (0.3.1)", True),
-    ):
-        runs = [simulate(p, hold=hold, outage=True) for p in PHASES]
+
+    def ranges(runs: list[Result]) -> str:
+        return "".join(f"{r.outage_min:7.1f}-{r.outage_max:4.1f}" for r in runs)
+
+    for mean in (0.0, MILD):
         print(
-            f"{label:36}"
-            + "".join(f"{r.outage_min:7.1f}-{r.outage_max:4.1f}" for r in runs)
+            f"{f'weather phase, {mean:+.0f} C mean':36}"
+            + "".join(f"{p:>12}" for p in PHASES)
         )
+        for title, show in rows:
+            print(title)
+            for label, options in controllers:
+                runs = [simulate(p, mean=mean, **options) for p in PHASES]
+                print(f"  {label:34}" + "".join(show(r) for r in runs))
+        print()
+    print("24 h room sensor outage, room (C):")
+    for label, options in (
+        ("valve closes (0.3.0)", {"hold": False}),
+        ("duty hold (0.3.1)", {}),
+        ("tickle", {"tickle": True}),
+        ("tickle, +10 C mean", {"tickle": True, "mean": MILD}),
+    ):
+        runs = [simulate(p, outage=True, **options) for p in PHASES]
+        print(f"  {label:34}{ranges(runs)}")
+    print("The same day, occupied mean room - target (K):")
+    for label, options in (
+        ("duty hold (0.3.1)", {}),
+        ("tickle", {"tickle": True}),
+        ("tickle, +10 C mean", {"tickle": True, "mean": MILD}),
+    ):
+        runs = [simulate(p, outage=True, **options) for p in PHASES]
+        print(f"  {label:34}" + "".join(f"{r.outage_mean_error:+12.2f}" for r in runs))
+    print("24 h return sensor outage, room (C):")
+    runs = [simulate(p, tickle=True, return_outage=True) for p in PHASES]
+    print(f"  {'tickle':34}{ranges(runs)}")
+    grids = ", ".join(f"{g:.0f}" for g in GRID_PHASES)
+    print(f"The tickle's outages on the grids at {grids} s, room (C):")
+    for label, options in (
+        ("room sensor lost", {"outage": True}),
+        ("room sensor lost, +10 C mean", {"outage": True, "mean": MILD}),
+        ("return sensor lost", {"return_outage": True}),
+    ):
+        runs = [
+            simulate(p, tickle=True, grid=g, **options)
+            for g in GRID_PHASES
+            for p in PHASES
+        ]
+        lowest = min(r.outage_min for r in runs)
+        highest = max(r.outage_max for r in runs)
+        print(f"  {label:34}{lowest:7.1f}-{highest:4.1f}")
+    print("11 restarts, occupied mean |room - target| (K):")
+    runs = [simulate(p, tickle=True, restarts=True) for p in PHASES]
+    print(f"  {'tickle':34}" + "".join(f"{r.mean_abs_error:12.2f}" for r in runs))
